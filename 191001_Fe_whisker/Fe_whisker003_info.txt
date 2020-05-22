@@ -1,0 +1,41 @@
+SEMPA info file version: 4
+file path: /home/sempa/data/191001_Fe_whisker/Fe_whisker003_info.txt
+run number: 3
+title: 
+note: 
+sample id: 
+start time: 2019-Oct-01 20:47:18.136660 UTC
+end time: 2019-Oct-01 20:51:44.978905 UTC
+num x points: 256
+num y points: 256
+x origin: 0
+y origin: 0
+x size: 1
+y size: 1
+x meters per full scale: 0.139
+y meters per full scale: 0.139
+magnification: 1200
+method: SEMPA
+Analog 1 enabled: 0
+Analog 2 enabled: 0
+Analog 3 enabled: 0
+counter delay: 1e-05
+counter dwell: 0.001
+analog delay: 0.00101
+raster period: 0.00101
+detector: XY
+IX counter zero: 125.537
+MX counter zero: 125.537
+IY counter zero: 125.537
+MY counter zero: 125.537
+MX sherman: 0.5
+MY sherman: 0.5
+beam voltage: 25
+beam current: 2.04e-09
+num overscan columns: 2
+repeat index: 1
+num repeats: 2
+num averages: 2
+horizontal drift: 0
+vertical drift: 0
+run uuid: 0f87360d-6878-4d45-85c4-e78a5f166179
