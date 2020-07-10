@@ -1,1 +1,1 @@
-pip install netCDF4 opencv-python colorspacious
+pip install netCDF4 opencv-python colorspacious matplotlib-scalebar pypng
