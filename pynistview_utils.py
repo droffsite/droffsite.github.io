@@ -227,10 +227,13 @@ def segment_image(image, segments=1, adaptive=False, sel=circle_array(1), erode_
     snakes = imutils.grab_contours(snakes)
     snakes = sorted(snakes, key=cv2.contourArea, reverse = True)[:segments]
 
-    # Allocate for segment # of binary masks, positive and negative, each the size of the image
-    masks = np.empty((segments, 2, image.shape[1], image.shape[0]))
+    # Handle possibly having fewer than specified number of segments
+    found = min(segments, len(snakes))
 
-    for i in range(segments):
+    # Allocate for segment # of binary masks, positive and negative, each the size of the image
+    masks = np.empty((found, 2, image.shape[1], image.shape[0]))
+
+    for i in range(found):
         contour = snakes[i]
         mask = cv2.fillPoly(np.zeros_like(image), [contour], 1)
         masks[i, 0] = mask
@@ -363,7 +366,7 @@ def show_vector_plot(im_x, im_y, ax=None, color='white', scale=2):
               scale_units='dots', color=color, scale=scale);
 
 
-def display_results(img_contrast_phase, img_denoised_1, img_flat_1, img_denoised_2, img_flat_2, img_intensity, img_scale, full_name, arrow_scale=4, axis_1='x', axis_2='y'):
+def display_results(img_contrast_phase, img_denoised_1, img_flat_1, img_denoised_2, img_flat_2, img_intensity, img_scale, full_name, arrow_scale=4, arrow_color='black', axis_1='x', axis_2='y'):
     fig = plt.figure(figsize=(20, 15), constrained_layout=True);
 
     gs = fig.add_gridspec(3, 3)
@@ -372,7 +375,7 @@ def display_results(img_contrast_phase, img_denoised_1, img_flat_1, img_denoised
     # Contrast image
     ax1 = plt.subplot(gs[:-1, :-1]);
     ax1.imshow(img_contrast_phase);
-    show_vector_plot(img_denoised_1, img_denoised_2, ax=ax1, color='black', scale=arrow_scale);
+    show_vector_plot(img_denoised_1, img_denoised_2, ax=ax1, color=arrow_color, scale=arrow_scale);
     ax1.add_artist(ScaleBar(img_scale, box_alpha=0.8));
     ax1.set_title('Domains in the {}-{} plane for {}'.format(axis_1, axis_2, full_name, fontdict={'fontsize': 24}));
 
