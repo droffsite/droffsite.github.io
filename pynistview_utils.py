@@ -1,5 +1,6 @@
 import os
 import io
+import imutils
 
 import numpy as np
 import matplotlib as mpl
@@ -13,6 +14,7 @@ from PIL import Image
 
 from scipy.ndimage import gaussian_filter, median_filter, rotate, zoom
 from scipy.signal import convolve2d
+from scipy.optimize import least_squares
 import scipy.misc
 
 from netCDF4 import Dataset
@@ -21,43 +23,37 @@ from colorspacious import cspace_convert
 
 import cv2
 
+from selelems import *
+
 
 # Define convenience functions
 
 def clean_image(image, sigma=50, h=25):
     """Remove gradient and noise from image"""
 
-    # Apply large sigma gaussian filter and subtract from the image to remove gradient
-    image_g = gaussian_filter(image, sigma)
-    image_nograd = image - image_g
+    # Rescale to 0..255 for filters
+    image_shifted = np.asarray(rescale(image, 0, 255), dtype=np.uint8)
 
-    # Incoming images are floats centered around zero; shift right so the range is positive
-    image_shifted = image_nograd + np.abs(image_nograd.min())
+    image_denoised = cv2.fastNlMeansDenoising(np.asarray(rescale(image_shifted, 0, 255), dtype=np.uint8), None, h, 7, 21)
+    image_denoised_blurred = gaussian_filter(image_denoised, sigma)
 
-    # Convert to 0-255 float for CV2 denoising
-    image_8U = np.uint8(image_shifted * 255 / image_shifted.max())
-    image_denoised = cv2.fastNlMeansDenoising(image_8U, None, h, 7, 21)
-
-    # Convert back to a float centered around zero
-    image_denoised = (image_denoised * image_shifted.max() / 255) - np.abs(image_nograd.min())
-
-    return image_nograd, image_denoised
+    return rescale_to(image_denoised, image), rescale_to(image_denoised_blurred, image)
 
 
-def combine_phase_and_contrast(phase, contrast):
+def render_phases_and_magnitudes(phases, magnitudes):
     """Adjust the intensity of the contrast image according to phase magnitude"""
 
     # Set up the colormap
     cmap = create_ciecam02_cmap()
 
     # Use CIECAM02 color map, convert to sRGB1 (to facilitate intensity adjustment)
-    im = cmap(contrast / (2 * np.pi))
+    im = cmap(magnitudes / (2 * np.pi))
     im_srgb = im[:, :, :3]
     im_adjusted = np.zeros_like(im_srgb)
 
     # Apply phase intensity mask to the contrast: low intensity -> dark, high intensity -> light
     for i in range(3):
-        im_adjusted[:, :, i] = np.multiply(im_srgb[:, :, i], phase)
+        im_adjusted[:, :, i] = np.multiply(im_srgb[:, :, i], phases)
 
     return im_adjusted
 
@@ -76,14 +72,14 @@ def create_ciecam02_cmap():
     return mpl.colors.ListedColormap(color_circle_rgb)
 
 
-def find_offsets(img_1, img_2):
-    """Use centroids to find offsets"""
+def find_com(img_1, img_2):
+    """Use centroids to find center of mass"""
 
     # Get the image dimensions
     dimx, dimy = img_1.shape[1], img_1.shape[0]
 
     # Calculate the 2D histogram to use for finding the CoM
-    hist, _, _ = np.histogram2d(img_2.ravel(), img_1.ravel(), bins=dimx)
+    hist, _, _ = np.histogram2d(img_1.ravel(), img_2.ravel(), bins=dimx)
 
     # Get position in histogram. This will be coordinates.
     x_cm = np.average(range(1, dimx + 1), weights=[np.sum(hist[:, x]) for x in range(dimx)])
@@ -96,19 +92,63 @@ def find_offsets(img_1, img_2):
     return x_cm, y_cm
 
 
-def get_contrast(im_x, im_y):
-    """Return combined x and y contrast"""
+def find_offsets(img_1, img_2):
+    """Minimize the min to max spread of the images to get most consistent magnitude"""
 
-    contrast = np.array([np.arctan2(y, x) for x, y in zip(im_x/im_x.max(), im_y/im_y.max())])
+    # Find a reasonable starting point
+    x0 = find_com(img_1, img_2)
+
+    res = least_squares(ptp_magnitudes, x0, bounds=(-4, 4), args=(img_1, img_2))
+
+    return res.x, res.status, res.message
+
+
+def ptp_magnitudes(variables, image_1, image_2):
+    """Function to be used for optimizing the offset"""
+
+    return np.ptp(get_magnitudes(image_1 - variables[0], image_2 - variables[1]))
+
+
+def fit_image(image, mask=None):
+    """Return a least-squares fitting of the input image. Allow specifying a mask to fit a subsection of the image."""
+
+    if mask is None:
+        mask = np.ones_like(image)
+
+    # Get dimensions
+    y_dim, x_dim = image.shape
+
+    # Flatten the mask to eliminate masked off indices
+    mask_flat = np.array(mask.flatten(), dtype=bool)
+
+    # The linalg function needs flattened arrays of coordinates and values
+    x, y = np.linspace(0, x_dim, x_dim), np.linspace(0, y_dim, y_dim)
+    X, Y = np.meshgrid(x, y, copy=False)
+    X, Y = X.flatten(), Y.flatten()
+
+    # Set up arrays for linalg function
+    A = np.array([X*0+1, X, Y, X**2, X**2*Y, X**2*Y**2, Y**2, X*Y**2, X*Y]).T
+    B = image.flatten()
+
+    coeff, r, rank, s = np.linalg.lstsq(A[mask_flat], B[mask_flat], rcond=None)
+
+    image_fit = np.sum(coeff * A, axis=1).reshape(image.shape)
+    image_fit_masked = image_fit * mask
+
+    #return (np.sum(coeff * A, axis=1) * mask.flatten()).reshape(image.shape)
+
+    return image_fit, image_fit_masked
+
+
+def get_phases(im_x, im_y):
+    """Return phases of combined images in radians"""
+
+    phases = np.arctan2(im_y/im_y.max(), im_x/im_x.max())
 
     # arctan2 works over the range -pi to pi; shift everything to 0 to 2pi for color mapping
-    contrast_adjusted = contrast.ravel()
-    for i in range(len(contrast_adjusted)):
-        value = contrast_adjusted[i]
-        positive = value >= 0
-        contrast_adjusted[i] = value if positive else value + 2 * np.pi
+    phases = [[x if x >= 0 else x + 2 * np.pi for x in row] for row in phases]
 
-    return contrast_adjusted.reshape(contrast.shape)
+    return np.asarray(phases)
 
 
 def get_file_key(f, key):
@@ -116,16 +156,15 @@ def get_file_key(f, key):
     return b''.join(f.variables[key][...].data).decode()
 
 
-def get_phase_intensities(im_x, im_y):
-    """Return an image of intensities: low -> dark, high -> light"""
+def get_magnitudes(im_x, im_y):
+    """Return magnitudes of combined images: low -> dark, high -> light"""
 
     # Use x and y values to determine magnitude
 
-    phase_intensities = [np.sqrt(x**2 + y**2)
-                         for x, y in zip(im_x.ravel(), im_y.ravel())]
-    phase_intensities /= np.max(phase_intensities)
+    magnitudes = np.sqrt(im_x**2 + im_y**2)
+    #magnitudes /= np.max(magnitudes)
 
-    return phase_intensities.reshape(im_x.shape)
+    return magnitudes.reshape(im_x.shape)
 
 
 def get_scale(file_path):
@@ -148,6 +187,91 @@ def image_data(file_path):
     file = Dataset(file_path, 'r')
 
     return file.variables['image_data'][...].data.T, str(file.variables['channel_name'][...].data[1], 'utf-8')
+
+
+def mean_shift_filter(image, sp=1, sr=1):
+    """Perform mean shift filtering"""
+
+    # Convert to 8 bit color for the filter
+    img = np.asarray(rescale(image, 0, 255), dtype=np.uint8)
+    img = cv2.cvtColor(median_filter(img, 5), cv2.COLOR_GRAY2BGR)
+
+    # sp = spatial window, sr = color window
+    img_shift = cv2.pyrMeanShiftFiltering(img, sp, sr)
+
+    # Convert back to grayscale
+    img_shift = cv2.cvtColor(img_shift, cv2.COLOR_BGR2GRAY)
+
+    return rescale(img_shift, image.min(), image.max())
+
+
+def segment_image(image, segments=1, adaptive=False, sel=circle_array(1), erode_iter=1, close_iter=7):
+    """Segment image into a defined number of objects. Create positive and negative masks for those objects."""
+
+    # Rescale to 0-255 for thresholding
+    image_shift = np.asarray(rescale(image, 0, 255), dtype=np.uint8)
+    ret, image_thresh = cv2.threshold(image_shift, image_shift.mean(), 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # Alternative thresholding mechanism
+    #m_1_thresh = cv2.adaptiveThreshold(m_1_shift, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 35, 0)
+    #m_1_shift = cv2.cvtColor(m_1_shift, cv2.COLOR_GRAY2BGR)
+
+    # Perform morphological operations. First kill small noise, then close the image
+    image_thresh = cv2.morphologyEx(image_thresh, cv2.MORPH_ERODE, sel, iterations=erode_iter)
+    image_thresh = cv2.morphologyEx(image_thresh, cv2.MORPH_CLOSE, sel, iterations=close_iter)
+
+    # Find the segment contours
+    snakes = cv2.findContours(image_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+    # Sort the results by size and keep the requested number
+    snakes = imutils.grab_contours(snakes)
+    snakes = sorted(snakes, key=cv2.contourArea, reverse = True)[:segments]
+
+    # Allocate for segment # of binary masks, positive and negative, each the size of the image
+    masks = np.empty((segments, 2, image.shape[1], image.shape[0]))
+
+    for i in range(segments):
+        contour = snakes[i]
+        mask = cv2.fillPoly(np.zeros_like(image), [contour], 1)
+        masks[i, 0] = mask
+        masks[i, 1] = np.ones_like(mask) - mask
+        cv2.drawContours(image_shift, [contour], -1, (0, 255, 0), 1)
+
+    # Draw the contours on the shifted input image
+#     for (i, c) in enumerate(snakes):
+#         ((x, y), _) = cv2.minEnclosingCircle(c)
+#         cv2.drawContours(image_shift, [c], -1, (0, 255, 0), 1)
+
+    return image_thresh, image_shift, masks
+
+
+def remove_line_errors(image, lines, use_rows=True):
+    """Remove line errors using either rows or columns"""
+
+    image_base = image if use_rows else image.T
+
+    image_mean = np.asarray([np.mean(image_base[:lines, x]) for x in range(image.shape[1])]).T
+
+    image_delined = image_base - np.tile(image_mean, (image.shape[0], 1))
+
+    image_delined = image_delined if use_rows else image_delined.T
+
+    return image_delined
+
+
+def rescale(data, to_min, to_max):
+    """Rescale data to have to_min and to_max as min and max, respectively"""
+
+    norm_data = (data - data.min()) / (data.max() - data.min())
+    factor = to_max - to_min
+
+    return norm_data * factor + to_min
+
+
+def rescale_to(source, target):
+    """Rescale source image to the same range as target"""
+
+    return rescale(source, target.min(), target.max())
 
 
 def save_file(file_path, img, axis_1, axis_2, scale):
@@ -239,7 +363,7 @@ def show_vector_plot(im_x, im_y, ax=None, color='white', scale=2):
               scale_units='dots', color=color, scale=scale);
 
 
-def display_results(img_contrast_phase, img_denoised_1, img_flat_1, img_denoised_2, img_flat_2, img_intensity, scale, full_name, axis_1='x', axis_2='y'):
+def display_results(img_contrast_phase, img_denoised_1, img_flat_1, img_denoised_2, img_flat_2, img_intensity, img_scale, full_name, arrow_scale=4, axis_1='x', axis_2='y'):
     fig = plt.figure(figsize=(20, 15), constrained_layout=True);
 
     gs = fig.add_gridspec(3, 3)
@@ -248,8 +372,8 @@ def display_results(img_contrast_phase, img_denoised_1, img_flat_1, img_denoised
     # Contrast image
     ax1 = plt.subplot(gs[:-1, :-1]);
     ax1.imshow(img_contrast_phase);
-    show_vector_plot(img_denoised_1, img_denoised_2, ax=ax1, color='black', scale=1.5);
-    ax1.add_artist(ScaleBar(scale, box_alpha=0.8));
+    show_vector_plot(img_denoised_1, img_denoised_2, ax=ax1, color='black', scale=arrow_scale);
+    ax1.add_artist(ScaleBar(img_scale, box_alpha=0.8));
     ax1.set_title('Domains in the {}-{} plane for {}'.format(axis_1, axis_2, full_name, fontdict={'fontsize': 24}));
 
     # Vector legend
@@ -260,13 +384,13 @@ def display_results(img_contrast_phase, img_denoised_1, img_flat_1, img_denoised
     # Flattened intensity
     ax3 = plt.subplot(gs[-1, 0]);
     ax3.imshow(img_intensity, cmap='gray');
-    ax3.add_artist(ScaleBar(scale));
+    ax3.add_artist(ScaleBar(img_scale));
     ax3.set_title('Intensity flattened');
 
     # Flattened M1
     ax4 = plt.subplot(gs[-1, 1]);
     ax4.imshow(img_flat_1, cmap='gray');
-    ax4.add_artist(ScaleBar(scale));
+    ax4.add_artist(ScaleBar(img_scale));
     ax4.set_title('M{} flattened: {:.3f} to {:.3f}'.format(axis_1, img_flat_1.min(), img_flat_1.max()));
 
     # Add a colorbar
@@ -280,7 +404,7 @@ def display_results(img_contrast_phase, img_denoised_1, img_flat_1, img_denoised
     # Flattened M2
     ax5 = plt.subplot(gs[-1, -1]);
     ax5.imshow(img_flat_2, cmap='gray');
-    ax5.add_artist(ScaleBar(scale));
+    ax5.add_artist(ScaleBar(img_scale));
     ax5.set_title('M{} flattened: {:.3f} to {:.3f}'.format(axis_2, img_flat_2.min(), img_flat_2.max()));
 
     # Add a colorbar
