@@ -3,9 +3,9 @@
 
 import wx
 from wx.lib.scrolledpanel import ScrolledPanel
-from wx.lib.stattext import GenStaticText
-from wx.adv import HyperlinkCtrl, HyperlinkEvent
-# from wx.lib.imagebrowser import ImagePanel
+from wx.adv import HyperlinkCtrl
+from wx.lib.sized_controls import SizedPanel
+
 from wxmplot import PlotPanel, ImagePanel
 
 import glob
@@ -15,7 +15,8 @@ from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_wxagg import FigureCanvasAgg as FigureCanvas
+from matplotlib_scalebar.scalebar import ScaleBar
+from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigureCanvas
 
 from matplotlib import cm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -42,18 +43,18 @@ image_min_width, image_min_height = 256, 256
 segments = 50
 
 # Specify gaussian denoising sigma
-sigma = 2
+sigma = 5
 
 # Specify non-local denoising strength h. Larger h -> more denoising.
 h = 20
 
 # Specify a scale for drawing the vector arrows. Smaller number -> longer
 # arrow.
-arrow_scale = 0.2
+arrow_scale = 2
 
 # Specify a color for the vector arrows.
-# arrow_color = 'black'
-arrow_color = 'white'
+arrow_color = 'black'
+# arrow_color = 'white'
 
 sempa_file_suffix = 'sempa'
 
@@ -76,7 +77,7 @@ default_h = 20
 # For ResultsPanel
 #
 # Scale for drawing the vector arrows. Smaller number -> longer arrow.
-default_arrow_scale = 0.2
+default_arrow_scale = 2
 
 # Color for the vector arrows.
 # default_arrow_color = 'black'
@@ -99,6 +100,9 @@ class pyNISTView():
             '{}*y*{}'.format(file, sempa_file_suffix)))
         files = sorted(np.append(files, glob.glob(
             '{}*z*{}'.format(file, sempa_file_suffix))))
+
+        self.dirname = os.path.basename(os.path.dirname(files[0]))
+        self.basename = os.path.basename(files[0])
 
         self.intensity, _ = pyn.image_data(files[0])
         self.m_1, self.axis_1 = pyn.image_data(files[2])
@@ -157,7 +161,7 @@ class pyNISTViewFrame(wx.Frame):
             self.main_panel, label=processed_label, style=wx.ALIGN_CENTER)
         processed_title.SetFont(self.title_font)
 
-        self.raw_panel = RawViewPanel(self.main_panel)
+        self.raw_panel = RawPanel(self.main_panel)
         self.work_panel = WorkPanel(self.main_panel, self.model)
         # self.button_panel = ButtonPanel(self.main_panel)
 
@@ -223,20 +227,17 @@ class pyNISTViewFrame(wx.Frame):
         menu_bar.Append(window_menu, '&Window')
         menu_bar.Append(help_menu, '&Help')
 
-        self.Bind(wx.EVT_MENU, self.on_open_files,
-                  source=open_files_menu_item)
+        self.Bind(wx.EVT_MENU, self.on_open_files, open_files_menu_item)
 
-        self.Bind(wx.EVT_MENU, self.on_save,
-                  source=save_menu_item)
+        self.Bind(wx.EVT_MENU, self.on_save, save_menu_item)
 
         self.Bind(wx.EVT_MENU, self.on_export_with_scale,
-                  source=export_with_scale_menu_item)
+                  export_with_scale_menu_item)
 
         self.Bind(wx.EVT_MENU, self.on_export,
-                  source=export_without_scale_menu_item)
+                  export_without_scale_menu_item)
 
-        self.Bind(wx.EVT_MENU, self.on_quit,
-                  source=quit_menu_item)
+        self.Bind(wx.EVT_MENU, self.on_quit, quit_menu_item)
 
         self.SetMenuBar(menu_bar)
 
@@ -245,10 +246,13 @@ class pyNISTViewFrame(wx.Frame):
 
         toolbar = self.CreateToolBar()
         open_tool = toolbar.AddTool(wx.ID_OPEN, 'Open', wx.Bitmap(
-            'img/topen.png'))
+            'img/topen.png'), shortHelp='Open')
+
         toolbar.AddSeparator()
+
         quit_tool = toolbar.AddTool(wx.ID_EXIT, 'Quit', wx.Bitmap(
-            'img/texit.png'))
+            'img/texit.png'), shortHelp='Quit')
+
         toolbar.Realize()
 
         self.Bind(wx.EVT_TOOL, self.on_open_files, open_tool)
@@ -268,7 +272,7 @@ class pyNISTViewFrame(wx.Frame):
         dlg.Destroy()
 
         if self.model is not None:
-            self.show_raw_images()
+            self.raw_panel.set_model(self.model)
             self.work_panel.set_model(self.model)
             self.set_status('Loaded')
         else:
@@ -293,53 +297,12 @@ class pyNISTViewFrame(wx.Frame):
         """Quit"""
         self.Close()
 
-    def show_raw_images(self):
-        # Make life easier
-        images = [self.model.m_1, self.model.m_2, self.model.intensity]
-
-        # Reset the contents of raw_panel
-        sizer = self.raw_panel.GetSizer()
-        sizer.Clear(True)
-
-        # Add the images
-        for i in range(len(images)):
-            image = images[i]
-            name = os.path.basename(self.model.file_names[i])
-
-            ip = ImagePanel(self.raw_panel, size=(
-                image_min_width, image_min_height))
-            ip.display(pyn.rescale(np.flip(image, axis=0), 0, 1))
-
-            file_name = wx.StaticText(self.raw_panel, label=name)
-            file_name.SetForegroundColour(wx.Colour(255, 255, 255))
-
-            sizer.Add(ip, 1, 0, 0)
-            sizer.Add(file_name, 1, wx.EXPAND, panel_spacing)
-
-        # Refresh the sizer to redraw the screen
-        sizer.Layout()
-
     def set_status(self, message):
         self.status_bar.SetStatusText(message)
 
-# class RawImagePanel(wx.Panel):
-#     def __init__(self, parent, image):
-#         super().__init__(parent, style=wx.BORDER_SUNKEN)
-#
-#         self.figure = Figure()
-#         self.axes = self.figure.add_subplot(111)
-#         self.canvas = FigureCanvas(self.figure)
-#         self.image = self.axes.imshow(image, aspect='auto')
-#
-#         self.sizer = wx.BoxSizer(wx.VERTICAL)
-#         self.sizer.Add(self.canvas, 1, wx.ALIGN_CENTER
-#                        | wx.EXPAND, panel_spacing)
-#         self.SetSizer(self.sizer)
-#         self.Fit()
 
-
-class RawViewPanel(wx.Panel):
-    """Define panel for raw views."""
+class RawPanel(ScrolledPanel):
+    """Panel for raw images."""
 
     def __init__(self, parent):
         super().__init__(parent, style=wx.BORDER_SUNKEN)
@@ -347,12 +310,47 @@ class RawViewPanel(wx.Panel):
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.SetBackgroundColour('#21242a')
 
-        self.SetMinSize(wx.Size(image_min_width, image_min_height))
+        self.SetMinSize(wx.Size(image_min_width + 20, image_min_height))
         self.SetSizer(sizer)
+
+        self.SetupScrolling()
+        self.SetAutoLayout(True)
+
+    def set_model(self, model):
+        # Images to display
+        images = [model.m_1, model.m_2, model.intensity]
+
+        # Reset the contents
+        sizer = self.GetSizer()
+        sizer.Clear(True)
+
+        dpi = wx.GetDisplayPPI().GetWidth()
+
+        # Add the images
+        for i in range(len(images)):
+            image = images[i]
+            name = os.path.basename(model.file_names[i])
+
+            ip = ImagePanel(self, size=(
+                image_min_width, image_min_height), dpi=dpi)
+            ip.display(pyn.rescale(np.flip(image, axis=0), 0, 1))
+
+            file_name = wx.StaticText(self, label=name)
+            file_name.SetForegroundColour(wx.Colour(255, 255, 255))
+
+            sizer.Add(ip, 1, 0, 0)
+            # sizer.Add(canvas, 1, wx.EXPAND, 0)
+            sizer.Add(file_name, 0, wx.EXPAND | wx.BOTTOM, panel_spacing)
+            sizer.AddSpacer(2 * panel_spacing)
+
+        # Refresh the sizer to redraw the screen
+        sizer.AddStretchSpacer()
+        sizer.FitInside(self)
+        sizer.Layout()
 
 
 class WorkPanel(wx.Panel):
-    """Define panel for doing work."""
+    """Panel for doing work."""
 
     def __init__(self, parent, model):
         super().__init__(parent, style=wx.BORDER_SUNKEN)
@@ -368,6 +366,9 @@ class WorkPanel(wx.Panel):
         self.nb.AddPage(denoise_page, "Denoise")
         self.nb.AddPage(offsets_page, "Offsets")
         self.nb.AddPage(results_page, "Results")
+
+        # Set to the results tab
+        self.nb.SetSelection(self.nb.GetPageCount() - 1)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(self.nb, 1, wx.EXPAND)
@@ -454,11 +455,8 @@ class PanelWithModel(ScrolledPanel):
         self.variables_box = None
         self.images_box = None
 
-        self.title_font = wx.SystemSettings.GetFont(wx.SYS_SYSTEM_FONT)
-        self.title_font.SetPointSize(18)
+        self.title_font = self.get_frame().title_font
 
-        # self.default_text = GenStaticText(
-        #     self, label='Please open a set of files', style=wx.ALIGN_CENTER)
         default_text = HyperlinkCtrl(
             self, label='Please open a set of files')
         default_text.SetFont(self.title_font)
@@ -532,11 +530,8 @@ class PanelWithModel(ScrolledPanel):
     def get_label_text(self, label):
         """Convenience wrapper for setting up labels"""
 
-        font = wx.SystemSettings.GetFont(wx.SYS_SYSTEM_FONT)
-        font.SetPointSize(18)
-
         label = wx.StaticText(self, label=label)
-        label.SetFont(font)
+        label.SetFont(self.title_font)
         label.SetForegroundColour(wx.Colour(255, 255, 255))
 
         return label
@@ -557,6 +552,15 @@ class PanelWithModel(ScrolledPanel):
     def get_images_box(self, images, labels):
         self.images_box = wx.BoxSizer(wx.HORIZONTAL)
 
+        # Monkey business to display the images as large as possible and fit
+        dpi = wx.GetDisplayPPI().GetWidth()
+        panel_width = self.GetSize().GetWidth()
+        image_count = len(images) / 2
+
+        # Width of panel minus scroll bar minus padding / # images
+        max_image_size = (panel_width - 40 - image_count
+                          * 2 * panel_spacing) / image_count
+
         # Add the images
         # Expect to show an image for m_1 and m_2 one on top of the other
         for i in range(0, len(images), 2):
@@ -569,8 +573,11 @@ class PanelWithModel(ScrolledPanel):
                 image = images[index]
                 label = labels[index]
                 image_height, image_width = image.shape
+                image_size = min((2 * image_width, max_image_size))
 
-                ip = ImagePanel(self, style=wx.BG_STYLE_SYSTEM)
+                # ip = ImagePanel(self, size=(image_width, image_height),
+                ip = ImagePanel(self, size=(image_size, image_size),
+                                dpi=dpi)
                 # Need to flip the image since the array does the y axis
                 # opposite display
                 ip.display(pyn.rescale(np.flip(image, axis=0), 0, 1),
@@ -594,7 +601,6 @@ class PanelWithModel(ScrolledPanel):
     def show_images(self):
         # Let there be light
 
-        # sizer = self.GetSizer()
         sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Add a sizer for variables
@@ -614,6 +620,26 @@ class PanelWithModel(ScrolledPanel):
 
         # Refresh the sizer to redraw the screen
         sizer.Layout()
+
+    def get_image_for_array(self, image_array):
+        dpi = wx.GetDisplayPPI()
+
+        image_height, image_width = image_array.shape
+
+        figure = Figure(figsize=(int(image_width/dpi.GetWidth()),
+                                 int(image_height/dpi.GetHeight())),
+                        frameon=False)
+
+        axes = figure.add_subplot(111)
+
+        axes.imshow(image_array, cmap='gray')
+        axes.grid(False)
+        axes.get_xaxis().set_visible(False)
+        axes.get_yaxis().set_visible(False)
+
+        canvas = FigureCanvas(self, 0, figure)
+
+        return canvas
 
 
 class FitPanel(PanelWithModel):
@@ -884,13 +910,107 @@ class ResultsPanel(PanelWithModel):
         self.arrow_scale = default_arrow_scale
         self.arrow_color = default_arrow_color
 
+        self.dpi = wx.GetDisplayPPI()
+
+    def get_m_1_final(self):
+        return self.GetParent().get_m_1_denoised()
+
+    def get_m_2_final(self):
+        return self.GetParent().get_m_2_denoised()
+
+    def model_updated(self):
+        super().model_updated()
+
+        # self.contrast_image = self.get_contrast_image()
+        # vector_legend = self.get_vector_legend()
+        # im, m1, m2 = self.get_flattened_images()
+
+        self.show_images()
+
     def show_images(self):
-        # Let there be light
+        sizer = wx.BoxSizer(wx.VERTICAL)
 
-        # Add a sizer for variables: additional_offset
+        # Add a sizer for variables
         variables_box = self.get_variables_box()
+        contrast_box = self.get_contrast_image()
 
-        # Add a sizer for images to show: fitted_denoised
+        sizer.AddMany([(variables_box, 0, wx.BOTTOM, panel_spacing),
+                       (contrast_box, 0, wx.BOTTOM, panel_spacing)])
+
+        self.SetSizerAndFit(sizer)
+
+        sizer.Layout()
+
+    def get_contrast_image(self):
+        axis_1, axis_2 = 'M{}'.format(
+            self.get_axis_1()), 'M{}'.format(self.get_axis_2())
+
+        title = self.get_model().dirname + '/' + self.get_model().basename
+        sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        img = pyn.render_phases_and_magnitudes(self.GetParent().get_phases(),
+                                               self.GetParent().get_magnitudes())
+
+        # Fix the scaling of the image
+        img = img / (2 * np.pi)
+
+        image_height, image_width, _ = img.shape
+
+        figure = Figure(figsize=(int(2 * image_width / self.dpi.GetWidth()),
+                                 int(2 * image_height / self.dpi.GetHeight())),
+                        frameon=False, constrained_layout=True)
+
+        axes = figure.add_subplot(111)
+
+        axes.imshow(img, vmin=0, vmax=2 * np.pi,
+                    cmap=pyn.create_ciecam02_cmap())
+        pyn.show_vector_plot(self.get_m_1_final(), self.get_m_2_final(),
+                             ax=axes, color=self.arrow_color,
+                             scale=self.arrow_scale)
+        axes.add_artist(ScaleBar(self.get_model().scale, box_alpha=0.8))
+
+        axes.grid(False)
+        axes.get_xaxis().set_visible(False)
+        axes.get_yaxis().set_visible(False)
+
+        axes.set_title(
+            'Domains in the {}-{} plane for {}'.format(
+                axis_1, axis_2, title),
+            fontdict={'fontsize': 12}, color='white')
+
+        canvas = FigureCanvas(self, 0, figure)
+
+        sizer.Add(canvas, 0, wx.BOTTOM, panel_spacing)
+
+        figure_2 = Figure(frameon=False, constrained_layout=True)
+        axes_2 = figure_2.add_subplot(111)
+        pyn.show_phase_colors_circle(axes_2)
+        axes_2.set_title('Magnetization angle', fontdict={'fontsize': 10})
+        canvas_2 = FigureCanvas(self, 0, figure_2)
+
+        sizer.Add(canvas_2, 0, wx.BOTTOM | wx.RIGHT, panel_spacing)
+        
+        return sizer
+
+    def get_vector_legend(self):
+        print()
+
+    def get_flattened_images(self):
+        print()
+
+    def get_variables(self):
+        scale_label = self.get_label_text('Arrow scale')
+        self.scale_input = wx.TextCtrl(self)
+        self.scale_input.SetValue(str(self.arrow_scale))
+
+        color_label = self.get_label_text('Arrow color')
+        self.color_input = wx.TextCtrl(self)
+        self.color_input.SetValue(self.arrow_color)
+
+        return ((scale_label, self.scale_input),
+                (color_label, self.color_input))
+
+    def get_images(self):
         axis_1, axis_2 = 'M{}'.format(
             self.get_axis_1()), 'M{}'.format(self.get_axis_2())
 
@@ -899,42 +1019,7 @@ class ResultsPanel(PanelWithModel):
         labels = [axis_1 + ' denoised, offset {}'.format(self.m_1_offset),
                   axis_2 + ' denoised, offset {}'.format(self.m_2_offset)]
 
-        images_box = self.get_images_box(images, labels)
-
-        # Put it all together
-        self.GetSizer().AddMany(
-            [(variables_box, 0, 3 * wx.BOTTOM, panel_spacing),
-             (images_box, 1, wx.EXPAND, panel_spacing)])
-
-        # Refresh the sizer to redraw the screen
-        # self.GetSizer().Fit(self)
-        self.GetSizer().Layout()
-        self.GetSizer().FitInside(self)
-
-    def get_variables_box(self):
-        font = wx.SystemSettings.GetFont(wx.SYS_SYSTEM_FONT)
-        font.SetPointSize(18)
-
-        scale_label = wx.StaticText(self, label=self.get_axis_1())
-        scale_label.SetFont(font)
-        scale_label.SetForegroundColour(wx.Colour(255, 255, 255))
-        scale_input = wx.TextCtrl(self)
-        scale_input.SetValue(str(self.arrow_scale))
-
-        color_label = wx.StaticText(self, label=self.get_axis_2())
-        color_label.SetFont(font)
-        color_label.SetForegroundColour(wx.Colour(255, 255, 255))
-        color_input = wx.TextCtrl(self)
-        color_input.SetValue(self.arrow_color)
-
-        self.variables_box = wx.BoxSizer(wx.HORIZONTAL)
-        self.variables_box.AddMany(
-            [(scale_label, 0, wx.RIGHT, panel_spacing),
-             (scale_input, 0, wx.RIGHT, 4 * panel_spacing),
-             (color_label, 0, wx.RIGHT, panel_spacing),
-             (color_input, 0, 0, panel_spacing)])
-
-        return self.variables_box
+        return images, labels
 
 
 def main():
