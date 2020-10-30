@@ -4,28 +4,20 @@
 import wx
 from wx.lib.scrolledpanel import ScrolledPanel
 from wx.adv import HyperlinkCtrl
-from wx.lib.sized_controls import SizedPanel
 
-from wxmplot import PlotPanel, ImagePanel
+from wxmplot import ImagePanel
 
 import glob
 import os
 
-from PIL import Image
 import numpy as np
-import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib_scalebar.scalebar import ScaleBar
 from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigureCanvas
 
-from matplotlib import cm
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from scipy.ndimage import gaussian_filter, median_filter
+from scipy.ndimage import median_filter
 
 import pynistview_utils as pyn
-import selelems as sel
-
-import cv2
 
 # import pynistview_utils as pyn
 
@@ -84,7 +76,7 @@ default_arrow_scale = 2
 default_arrow_color = 'white'
 
 
-class pyNISTView():
+class pyNISTView:
     """Main class for processing SEMPA images"""
 
     def __init__(self, file_path):
@@ -126,6 +118,9 @@ class pyNISTView():
         self.intensity_flat = self.intensity - self.intensity_blurred
 
         self.scale = pyn.get_scale(files[0])
+
+    def get_name(self):
+        return self.dirname + '/' + self.basename[:self.basename.rfind('_')]
 
 
 class pyNISTViewFrame(wx.Frame):
@@ -274,8 +269,10 @@ class pyNISTViewFrame(wx.Frame):
         if self.model is not None:
             self.raw_panel.set_model(self.model)
             self.work_panel.set_model(self.model)
+            self.set_title(app_name + ': ' + self.model.get_name())
             self.set_status('Loaded')
         else:
+            self.set_title(app_name)
             self.set_status('Nothing loaded')
 
     def on_save(self, event):
@@ -296,6 +293,9 @@ class pyNISTViewFrame(wx.Frame):
     def on_quit(self, event):
         """Quit"""
         self.Close()
+
+    def set_title(self, title):
+        self.SetTitle(title)
 
     def set_status(self, message):
         self.status_bar.SetStatusText(message)
@@ -432,6 +432,18 @@ class WorkNotebook(wx.Notebook):
 
     def set_m_2_denoised(self, value):
         self.m_2_denoised = value
+
+    def get_m_1_offset(self):
+        return self.m_1_offset
+
+    def set_m_1_offset(self, value):
+        self.m_1_offset = value
+
+    def get_m_2_offset(self):
+        return self.m_2_offset
+
+    def set_m_2_offset(self, value):
+        self.m_2_offset = value
 
     def get_phases(self):
         return self.phases
@@ -615,19 +627,18 @@ class PanelWithModel(ScrolledPanel):
             [(variables_box, 0, wx.BOTTOM, panel_spacing),
              (images_box, 0, wx.BOTTOM, panel_spacing)])
 
-        self.SetSizerAndFit(sizer)
-        sizer.FitInside(self)
-
         # Refresh the sizer to redraw the screen
+        self.SetSizer(sizer)
         sizer.Layout()
+        self.FitInside()
 
     def get_image_for_array(self, image_array):
         dpi = wx.GetDisplayPPI()
 
         image_height, image_width = image_array.shape
 
-        figure = Figure(figsize=(int(image_width/dpi.GetWidth()),
-                                 int(image_height/dpi.GetHeight())),
+        figure = Figure(figsize=(image_width // dpi.GetWidth(),
+                                 image_height // dpi.GetHeight()),
                         frameon=False)
 
         axes = figure.add_subplot(111)
@@ -640,6 +651,12 @@ class PanelWithModel(ScrolledPanel):
         canvas = FigureCanvas(self, 0, figure)
 
         return canvas
+
+    def get_variables(self):
+        return ()
+
+    def get_images(self):
+        return ((), ())
 
 
 class FitPanel(PanelWithModel):
@@ -661,13 +678,13 @@ class FitPanel(PanelWithModel):
         self.show_images()
 
     def remove_line_errors(self):
-        self.m_1_delined = pyn.remove_line_errors(self.get_m_1(), self.lines)
-        self.m_2_delined = pyn.remove_line_errors(self.get_m_2(), self.lines)
-
-        self.m_1_delined = pyn.rescale(self.m_1_delined, self.get_m_1_min(),
-                                       self.get_m_1_max())
-        self.m_2_delined = pyn.rescale(self.m_2_delined, self.get_m_2_min(),
-                                       self.get_m_2_max())
+        # self.m_1_delined = pyn.remove_line_errors(self.get_m_1(), self.lines)
+        # self.m_2_delined = pyn.remove_line_errors(self.get_m_2(), self.lines)
+        #
+        # self.m_1_delined = pyn.rescale_to(self.m_1_delined, self.get_m_1())
+        # self.m_2_delined = pyn.rescale_to(self.m_2_delined, self.get_m_2())
+        self.m_1_delined = self.get_m_1()
+        self.m_2_delined = self.get_m_2()
 
     def mean_shift(self):
         self.m_1_shift = pyn.mean_shift_filter(self.m_1_delined)
@@ -806,8 +823,7 @@ class DenoisePanel(PanelWithModel):
         return ((sigma_label, self.sigma_input), (h_label, self.h_input))
 
     def get_images(self):
-        axis_1, axis_2 = 'M{}'.format(
-            self.get_axis_1()), 'M{}'.format(self.get_axis_2())
+        axis_1, axis_2 = self.get_axes()
 
         images = [self.m_1_fitted_denoised, self.m_2_fitted_denoised]
 
@@ -860,6 +876,8 @@ class OffsetsPanel(PanelWithModel):
                              self.get_m_2_fitted_denoised())
 
         self.m_1_offset, self.m_2_offset = offsets
+        self.GetParent().set_m_1_offset(self.m_1_offset)
+        self.GetParent().set_m_2_offset(self.m_2_offset)
 
     def apply_offsets(self):
         self.m_1_denoised = self.get_m_1_fitted_denoised() - self.m_1_offset
@@ -890,8 +908,7 @@ class OffsetsPanel(PanelWithModel):
                 (m_2_label, self.m_2_input))
 
     def get_images(self):
-        axis_1, axis_2 = 'M{}'.format(
-            self.get_axis_1()), 'M{}'.format(self.get_axis_2())
+        axis_1, axis_2 = self.get_axes()
 
         images = [self.m_1_denoised, self.m_2_denoised]
 
@@ -912,18 +929,29 @@ class ResultsPanel(PanelWithModel):
 
         self.dpi = wx.GetDisplayPPI()
 
+    def get_intensity_final(self):
+        return self.get_model().intensity_flat
+
     def get_m_1_final(self):
         return self.GetParent().get_m_1_denoised()
 
     def get_m_2_final(self):
         return self.GetParent().get_m_2_denoised()
 
+    def get_m_1_offset(self):
+        return self.GetParent().get_m_1_offset()
+
+    def get_m_2_offset(self):
+        return self.GetParent().get_m_2_offset()
+
+    def get_phases(self):
+        return self.GetParent().get_phases()
+
+    def get_magnitudes(self):
+        return self.GetParent().get_magnitudes()
+
     def model_updated(self):
         super().model_updated()
-
-        # self.contrast_image = self.get_contrast_image()
-        # vector_legend = self.get_vector_legend()
-        # im, m1, m2 = self.get_flattened_images()
 
         self.show_images()
 
@@ -932,38 +960,42 @@ class ResultsPanel(PanelWithModel):
 
         # Add a sizer for variables
         variables_box = self.get_variables_box()
-        contrast_box = self.get_contrast_image()
+        contrast_box = self.get_images_box()
 
         sizer.AddMany([(variables_box, 0, wx.BOTTOM, panel_spacing),
                        (contrast_box, 0, wx.BOTTOM, panel_spacing)])
 
-        self.SetSizerAndFit(sizer)
-
+        # sizer.SetSizeHints(self)
+        self.SetSizer(sizer)
         sizer.Layout()
+        self.FitInside()
 
-    def get_contrast_image(self):
-        axis_1, axis_2 = 'M{}'.format(
-            self.get_axis_1()), 'M{}'.format(self.get_axis_2())
+    def get_images_box(self):
+        axis_1, axis_2 = self.get_axes()
 
-        title = self.get_model().dirname + '/' + self.get_model().basename
-        sizer = wx.BoxSizer(wx.HORIZONTAL)
+        v_sizer = wx.BoxSizer(wx.VERTICAL)
+        h_sizer_1 = wx.BoxSizer(wx.HORIZONTAL)
 
-        img = pyn.render_phases_and_magnitudes(self.GetParent().get_phases(),
-                                               self.GetParent().get_magnitudes())
+        # Main image first
+        title = self.get_model().get_name()
+
+        img = pyn.render_phases_and_magnitudes(self.get_phases(),
+                                               self.get_magnitudes())
 
         # Fix the scaling of the image
-        img = img / (2 * np.pi)
+        img = (img * 255 / (2 * np.pi)).astype(np.uint8)
+        cmap = pyn.create_ciecam02_cmap()
 
         image_height, image_width, _ = img.shape
+        dpi = wx.GetDisplayPPI().GetWidth()
 
-        figure = Figure(figsize=(int(2 * image_width / self.dpi.GetWidth()),
-                                 int(2 * image_height / self.dpi.GetHeight())),
+        figure = Figure(figsize=(2 * image_width // dpi,
+                                 2 * image_height // dpi),
                         frameon=False, constrained_layout=True)
 
         axes = figure.add_subplot(111)
 
-        axes.imshow(img, vmin=0, vmax=2 * np.pi,
-                    cmap=pyn.create_ciecam02_cmap())
+        axes.imshow(img, cmap=cmap)
         pyn.show_vector_plot(self.get_m_1_final(), self.get_m_2_final(),
                              ax=axes, color=self.arrow_color,
                              scale=self.arrow_scale)
@@ -980,23 +1012,76 @@ class ResultsPanel(PanelWithModel):
 
         canvas = FigureCanvas(self, 0, figure)
 
-        sizer.Add(canvas, 0, wx.BOTTOM, panel_spacing)
+        h_sizer_1.Add(canvas, 0, wx.BOTTOM, panel_spacing)
+        h_sizer_1.AddStretchSpacer()
+
+        # Now angle legend
+        legend_sizer = wx.BoxSizer(wx.VERTICAL)
+        legend_sizer.AddStretchSpacer()
 
         figure_2 = Figure(frameon=False, constrained_layout=True)
-        axes_2 = figure_2.add_subplot(111)
+        axes_2 = figure_2.add_subplot(111, polar=True)
         pyn.show_phase_colors_circle(axes_2)
-        axes_2.set_title('Magnetization angle', fontdict={'fontsize': 10})
+        axes_2.set_title('Magnetization angle', fontdict={'fontsize': 10},
+                         color='white')
         canvas_2 = FigureCanvas(self, 0, figure_2)
 
-        sizer.Add(canvas_2, 0, wx.BOTTOM | wx.RIGHT, panel_spacing)
-        
-        return sizer
+        legend_sizer.Add(canvas_2, 0, 0, 0)
+        legend_sizer.AddStretchSpacer()
 
-    def get_vector_legend(self):
-        print()
+        h_sizer_1.Add(legend_sizer, 0, wx.EXPAND | wx.BOTTOM | wx.RIGHT, panel_spacing)
 
-    def get_flattened_images(self):
-        print()
+        # More nonsense
+        # ip = ImagePanel(self, size=(2 * image_width, 2 * image_height), dpi=dpi)
+        # ip.display(np.flip(img / 255, axis=0))
+        #
+        # h_sizer_1.Add(ip, 1, 0, 0)
+
+        v_sizer.Add(h_sizer_1, 1, wx.EXPAND | wx.ALL, panel_spacing)
+
+        # Flattened images
+        h_sizer_2 = wx.BoxSizer(wx.HORIZONTAL)
+
+        # intensity_ip = ImagePanel(self, size=(image_width, image_height), dpi=dpi)
+        # intensity_ip.display(pyn.rescale(np.flip(self.get_intensity_final(), axis=0), 0, 1))
+        # m_1_ip = ImagePanel(self, size=(image_width, image_height), dpi=dpi)
+        # m_1_ip.display(pyn.rescale(np.flip(self.get_m_1_final(), axis=0), 0, 1))
+        # m_2_ip = ImagePanel(self, size=(image_width, image_height), dpi=dpi)
+        # m_2_ip.display(pyn.rescale(np.flip(self.get_m_2_final(), axis=0), 0, 1))
+
+        intensity_ip = self.image_panel_box_for(self.get_intensity_final(),
+                                                'Intensity flattened')
+        m_1_ip = self.image_panel_box_for(self.get_m_1_final(),
+                                          '{} flattened'.format(axis_1))
+        m_2_ip = self.image_panel_box_for(self.get_m_2_final(),
+                                          '{} flattened'.format(axis_2))
+
+        h_sizer_2.Add(intensity_ip, 1, 0, 0)
+        h_sizer_2.AddStretchSpacer()
+        h_sizer_2.Add(m_1_ip, 1, 0, 0)
+        h_sizer_2.AddStretchSpacer()
+        h_sizer_2.Add(m_2_ip, 1, 0, 0)
+
+        v_sizer.AddSpacer(4 * panel_spacing)
+        v_sizer.Add(h_sizer_2, 0, wx.ALL, panel_spacing)
+
+        return v_sizer
+
+    def image_panel_box_for(self, image, title):
+        image_height, image_width = image.shape
+        dpi = wx.GetDisplayPPI().GetWidth()
+
+        v_box = wx.BoxSizer(wx.VERTICAL)
+
+        ip = ImagePanel(self, size=(image_width, image_height), dpi=dpi)
+        ip.display(pyn.rescale(np.flip(image, axis=0), 0, 1))
+        title_text = wx.StaticText(self, label=title)
+        title_text.SetForegroundColour(wx.Colour(255, 255, 255))
+
+        v_box.AddMany([(ip, 0, wx.BOTTOM, 2 * panel_spacing), (title_text, 0,
+                                                       wx.EXPAND, 0)])
+
+        return v_box
 
     def get_variables(self):
         scale_label = self.get_label_text('Arrow scale')
@@ -1011,13 +1096,12 @@ class ResultsPanel(PanelWithModel):
                 (color_label, self.color_input))
 
     def get_images(self):
-        axis_1, axis_2 = 'M{}'.format(
-            self.get_axis_1()), 'M{}'.format(self.get_axis_2())
+        axis_1, axis_2 = self.get_axes()
 
-        images = [self.m_1_denoised, self.m_2_denoised]
+        images = [self.get_m_1_final(), self.get_m_2_final()]
 
-        labels = [axis_1 + ' denoised, offset {}'.format(self.m_1_offset),
-                  axis_2 + ' denoised, offset {}'.format(self.m_2_offset)]
+        labels = [axis_1 + ' denoised, offset {}'.format(self.get_m_1_offset()),
+                  axis_2 + ' denoised, offset {}'.format(self.get_m_2_offset())]
 
         return images, labels
 
