@@ -7,8 +7,7 @@ from wx.adv import HyperlinkCtrl
 
 from wxmplot import ImagePanel
 
-import glob
-import os
+import glob, os
 
 import numpy as np
 from matplotlib.figure import Figure
@@ -875,7 +874,7 @@ class OffsetsPanel(PanelWithModel):
             pyn.find_offsets(self.get_m_1_fitted_denoised(),
                              self.get_m_2_fitted_denoised())
 
-        self.m_1_offset, self.m_2_offset = offsets
+        self.m_1_offset, self.m_2_offset, _ = offsets
         self.GetParent().set_m_1_offset(self.m_1_offset)
         self.GetParent().set_m_2_offset(self.m_2_offset)
 
@@ -979,12 +978,8 @@ class ResultsPanel(PanelWithModel):
         # Main image first
         title = self.get_model().get_name()
 
-        img = pyn.render_phases_and_magnitudes(self.get_phases(),
+        img = pyn.render_phases_and_magnitudes(self.get_phases()[0],
                                                self.get_magnitudes())
-
-        # Fix the scaling of the image
-        img = (img * 255 / (2 * np.pi)).astype(np.uint8)
-        cmap = pyn.create_ciecam02_cmap()
 
         image_height, image_width, _ = img.shape
         dpi = wx.GetDisplayPPI().GetWidth()
@@ -993,9 +988,9 @@ class ResultsPanel(PanelWithModel):
                                  2 * image_height // dpi),
                         frameon=False, constrained_layout=True)
 
-        axes = figure.add_subplot(111)
+        axes = figure.add_subplot(1, 1, 1)
 
-        axes.imshow(img, cmap=cmap)
+        axes.imshow(img)
         pyn.show_vector_plot(self.get_m_1_final(), self.get_m_2_final(),
                              ax=axes, color=self.arrow_color,
                              scale=self.arrow_scale)
