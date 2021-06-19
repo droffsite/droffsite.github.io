@@ -1,6 +1,6 @@
 """Functions for pyNISTview."""
 
-import imutils, glob, io
+import imutils, glob, io, itertools
 
 import numpy as np
 import matplotlib as mpl
@@ -18,6 +18,7 @@ from netCDF4 import Dataset
 from colorspacious import cspace_convert
 
 import cv2
+from scipy.signal.signaltools import fftconvolve
 
 from selelems import circle_array
 
@@ -135,7 +136,7 @@ def clean_image(image, sigma=50, h=25):
     return rescale_to(image_denoised, image),rescale_to(image_denoised_blurred, image)
 
 
-def create_ciecam02_cmap():
+def ciecam02_cmap():
     """Create a perceptually uniform colormap based on CIECAM02."""
     # Based on https://stackoverflow.com/questions/23712207/cyclic-colormap-without-visual-distortions-for-use-in-phase-angle-plots
 
@@ -147,6 +148,39 @@ def create_ciecam02_cmap():
     color_circle_rgb = cspace_convert(color_circle, 'JCh', 'sRGB1')
 
     return mpl.colors.ListedColormap(color_circle_rgb)
+
+
+def find_circular_contours(img, diff_axes_threshold=8, comparator='gt'):
+    """Return an array of circular contours found in the input image. Also return the full array of contours."""
+    circle_contours = []
+
+    # Work on the values above (default) or below the mean
+    ups = np.where(img > img.mean(), 255, 0) if comparator == 'gt' else \
+        np.where(img < img.mean(), 255, 0)
+    
+    # OpenCV requires unsigned ints
+    ups = ups.astype(np.uint8)
+    xdim, ydim = ups.shape[1], ups.shape[0]
+
+    # Find all contours
+    contours = cv2.findContours(ups, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)[-2]
+
+    # Remove the contours that are on the edges
+    contours_g = (contour for contour in contours \
+                  if 0 not in contour and xdim - 1 not in contour[:, :, 0] \
+                  and ydim - 1 not in contour[:, :, 1])
+
+    for contour in contours_g:
+        # Fit the contour to an ellipse. This requires there be at least 5 points in the contour
+        # (thus the if). Throw out anything where the major and minor axes are different by more
+        # than the threshold
+        diff_radii = cv2.fitEllipse(contour)[1] if len(contour) > 4 else [diff_axes_threshold + 1, 0]
+        diff = np.abs(diff_radii[0] - diff_radii[1])
+
+        if diff < diff_axes_threshold:
+            circle_contours.append(contour)
+            
+    return circle_contours, contours
 
 
 def file_for(files, token):
@@ -258,7 +292,7 @@ def get_magnitudes(im_x, im_y, im_z=None):
 
 def get_phases(im_x, im_y, im_z=None):
     """Return phases of combined images in radians."""
-    # First handle X and Y normalized
+    # First determine phi from X and Y normalized
     phis = np.arctan2(im_y / im_y.max(), im_x / im_x.max())
 
     # arctan2 works over the range -pi to pi; shift everything to 0 to 2pi
@@ -269,12 +303,33 @@ def get_phases(im_x, im_y, im_z=None):
     thetas = np.ones_like(im_x) * np.pi / 2
 
     if im_z is not None:
-        # Get the XY magnitudes, then arctan that over Z. Range 0 to pi.
+        # Get the XY magnitudes, then arctan Z over that. Range 0 to pi.
         xy_magnitudes = get_magnitudes(im_x, im_y)
-        thetas = np.arctan2(im_z / im_z.max(),
+        thetas = -np.arctan2(im_z / im_z.max(),
                             xy_magnitudes / xy_magnitudes.max()) + np.pi/2
 
     return (np.asarray(phis), thetas)
+
+
+def get_phi_diff(path, phis):
+    """Determine the average angle of magnetization relative to the
+       contour it circles."""
+    # Determine the angle along the path from point to point, looping
+    # from the end to the beginning
+    dydx = np.array([(np.arctan2(-(path[i][1] - path[i - 1][1]), 
+                      path[i][0] - path[i - 1][0])) for i in range(1, len(path))])
+    dydx = np.append(dydx, np.arctan2(
+        path[0][1] - path[-1][1], path[0][0] - path[-1][0]))
+
+    # Collect the phis along the path and subtract them from the path angles
+    phis_path = np.array([phis[point[1], point[0]] for point in path])
+    # Adjust to keep the range -pi to pi
+    phis_path = np.where(phis_path > np.pi, phis_path - 2 * np.pi, phis_path)
+
+    phis_diff = phis_path - dydx
+    phis_diff = np.where(phis_diff < -np.pi, phis_diff + 2 * np.pi, phis_diff)
+
+    return np.mean(phis_diff), np.std(phis_diff)
 
 
 def get_scale(file_path):
@@ -400,7 +455,7 @@ def remove_line_errors(image, lines, use_rows=True):
 def render_phases_and_magnitudes(phases, magnitudes):
     """Adjust the intensity of the contrast image according to phase magnitude."""
     # Set up the colormap
-    cmap = create_ciecam02_cmap()
+    cmap = ciecam02_cmap()
 
     # Use CIECAM02 color map, convert to sRGB1 (to facilitate intensity adjustment)
     im = cmap(phases / (2 * np.pi))
@@ -409,14 +464,14 @@ def render_phases_and_magnitudes(phases, magnitudes):
 
     # Apply phase intensity mask to the contrast: low intensity -> dark, high intensity -> light
     for i in range(3):
-        im_adjusted[:, :, i] = np.multiply(im_srgb[:, :, i], magnitudes)
+        im_adjusted[:, :, i] = np.multiply(im_srgb[:, :, i], rescale_to(magnitudes, [0.3, 1]))
 
     return im_adjusted
 
 
 def rescale(data, to_min, to_max):
     """Rescale data to have to_min and to_max as min and max, respectively."""
-    norm_data = (data - data.min()) / (data.max() - data.min())
+    norm_data = (data - np.min(data)) / (np.max(data) - np.min(data))
     factor = to_max - to_min
 
     return norm_data * factor + to_min
@@ -424,7 +479,7 @@ def rescale(data, to_min, to_max):
 
 def rescale_to(source, target):
     """Rescale source image to the same range as target."""
-    return rescale(source, target.min(), target.max())
+    return rescale(source, np.min(target), np.max(target))
 
 
 def rescale_to_8_bit(data):
@@ -478,7 +533,7 @@ def save_intensity_images(path, figsize=(3, 3), dpi=300):
         ax.axes.get_xaxis().set_visible(False)
         ax.axes.get_yaxis().set_visible(False)
 
-        plt.savefig(path + file + '_' + axis_1 + axis_2 + '_im.png')
+        plt.savefig(path + file + '_im.png')
         plt.close()
     
 
@@ -530,6 +585,164 @@ def segment_image(image, segments=1, adaptive=False, sel=circle_array(1),
     return image_thresh, image_shift, masks
 
 
+def show_circles(magnitudes, phis, thetas, contours, scale,
+                 show_numbers=True, reverse=True, alpha=1, show='phis',
+                 normalize=True, show_both=False, phis_m=None,
+                 candidate_cutoff=0.5235987756):
+    """Plot all circular contours."""
+    masked_circles, _, boxes = show_all_circles(thetas, contours, reverse=reverse)
+    count = len(boxes)
+
+    num_columns = 3 if not show_both else 4
+    column_width = 8 if not show_both else 6
+    total_count = count if not show_both else 2 * count
+    num_rows = np.ceil(total_count / num_columns).astype(int)
+    yd, xd = magnitudes.shape
+
+    colors = itertools.cycle(['red', 'yellow', 'green', 'blue'])
+
+    extent_factor = 0.3
+    index = 1
+
+    # Track candidates. Cutoff of pi/6 allows for 3 sigma.
+    candidates = {}
+
+    plt.figure(figsize=(num_columns * column_width, num_rows * column_width));
+
+    for box in boxes:
+        path = np.squeeze(contours[count - index])#[::-1]
+        num_pts = len(path)
+        pts = [path[0], path[int(num_pts / 4)], path[int(num_pts / 2)],
+               path[int(3 * num_pts / 4)]]
+
+        xmin, ymin, width, height = box
+        extent_x, extent_y = int(extent_factor * width), int(extent_factor * height)
+        extent = np.min([extent_x, extent_y])
+        xmin, ymin = np.max([xmin - extent, 0]), np.max([ymin - extent, 0])
+        xmax = np.min([xmin + width + 2 * extent, xd])
+        ymax = np.min([ymin + height + 2 * extent, yd])
+        box_xd, box_yd = xmax - xmin, ymax - ymin
+
+        m_subset = magnitudes[ymin:ymax, xmin:xmax]
+        p_subset = phis[ymin:ymax, xmin:xmax]
+        t_subset = thetas[ymin:ymax, xmin:xmax]
+        
+        im_to_show = p_subset if show_both == 'phis' else t_subset
+        cmap_to_show = ciecam02_cmap() if show == 'phis' else cm.coolwarm_r
+        
+        # Create a pair of (x, y) coordinates
+        x = np.linspace(1, box_xd - 2, box_xd, dtype=np.uint8)
+        y = np.linspace(1, box_yd - 2, box_yd, dtype=np.uint8)
+        X, Y = np.meshgrid(x, y)
+
+        # Create vector lengths
+        if normalize:
+            U = np.ones_like(m_subset)
+            V = np.ones_like(m_subset)
+        else:
+            U = m_subset * np.cos(p_subset) * np.sin(t_subset)
+            V = m_subset * np.sin(p_subset) * np.sin(t_subset)
+
+        index_to_show = index if not show_both else 2 * index - 1
+        ax = plt.subplot(num_rows, num_columns, index_to_show)
+        ax.autoscale()
+        ax.imshow(im_to_show, cmap=cmap_to_show)
+        ax.imshow(masked_circles[ymin:ymax, xmin:xmax], interpolation='none', alpha=alpha)
+        ax.add_artist(ScaleBar(scale, box_alpha=0.8))
+
+        dev_avg, dev_std = get_phi_diff(path, phis)
+        candidate = dev_std <= candidate_cutoff
+        if candidate:
+            candidates[index] = [dev_avg, dev_std]
+        
+        title = f'({xmin}, {ymin}) to ({xmax}, {ymax}), ' \
+                f'{int(width * scale * 10e8)}x{int(height * scale * 10e8)} nm, ' \
+               rf'$\phi_{{dev}}:\ {dev_avg:.3f},\ \sigma_{{dev}}:\ {dev_std:.2f}$'
+
+        ax.set_title(title)
+
+        for point in pts:
+            ax.scatter(point[0] - xmin, point[1] - ymin, c=next(colors))
+
+        if show_numbers:
+            c = 'black' if not candidate else 'blue'
+            label = index if not candidate else f'{index}*'
+
+            t = ax.text(0, 0, label, fontdict={'fontsize': 20}, c=c,
+                    horizontalalignment='left', verticalalignment='top');
+            t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=c))
+
+        ax.quiver(X, Y, U, V, units='dots', angles=p_subset * 180 / np.pi, pivot='mid')
+
+        span = 5
+        ax.set_xticks(x[::span])
+        ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
+        ax.set_yticks(y[::span])
+        ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
+        
+        if show_both:
+            p_m_subset = phis_m[ymin:ymax, xmin:xmax]
+            
+            ax = plt.subplot(num_rows, num_columns, 2 * index)
+            ax.autoscale()
+            ax.imshow(p_m_subset, cmap=ciecam02_cmap())
+            ax.imshow(masked_circles[ymin:ymax, xmin:xmax], interpolation='none',
+                      alpha=alpha, cmap=cm.binary)
+            ax.add_artist(ScaleBar(scale, box_alpha=0.8))
+
+            if show_numbers:
+                t = ax.text(0, 0, index, fontdict={'fontsize': 20}, c='black',
+                        horizontalalignment='left', verticalalignment='top')
+                t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor='black'))
+
+            ax.quiver(X, Y, U, V, units='dots', angles=p_subset * 180 / np.pi, color='white')
+
+            ax.set_title(title)
+            span = 5
+            ax.set_xticks(x[::span])
+            ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
+            ax.set_yticks(y[::span])
+            ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
+            
+        index += 1
+
+    return candidates
+
+
+def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=True, alpha=1, color='black'):
+    """Plot all circular contours."""
+    # Convert img to color and draw the contours
+    c_img = cv2.cvtColor(np.zeros_like(img, dtype=np.uint8), cv2.COLOR_GRAY2RGB)
+    cv2.drawContours(c_img, contours, -1, (255, 255, 255), 1)
+
+    # Convert resultant image back to grayscale to produce a mask
+    c_img_gray = cv2.cvtColor(c_img, cv2.COLOR_RGB2GRAY)
+    masked_circles = np.ma.masked_where(c_img_gray == 0, c_img_gray)
+
+    # Use the mask to produce an RBGA image (transparent background)
+    c_img_rgba = cv2.cvtColor(c_img, cv2.COLOR_RGB2RGBA)
+    c_img_rgba[:, :, 3] = masked_circles
+    
+    boxes = [cv2.boundingRect(contour) for contour in contours]
+    if reverse:
+        boxes = boxes[::-1]
+
+    if ax is not None:
+        cmap_to_show = cm.binary_r if color == 'black' else cm.binary
+        ax.imshow(masked_circles, interpolation='none', alpha=alpha, cmap=cmap_to_show)
+    
+        if show_numbers:
+            index = 1
+
+            for box in boxes:
+                xmin, ymin, extent_x, extent_y = box
+                ax.text(xmin + extent_x / 2, ymin + extent_y / 2, index, alpha=alpha, color=color,
+                        horizontalalignment='center', verticalalignment='center')
+                index += 1
+
+    return masked_circles, c_img_rgba, boxes
+
+
 def show_phase_colors_circle_old(ax=None, add_dark_background=True,
                              text_color='white'):
     """Plot a ring of colors for a legend."""
@@ -547,7 +760,7 @@ def show_phase_colors_circle_old(ax=None, add_dark_background=True,
         ax.scatter(0, 0, s=dim ** 2, marker='o', color='#3A404C')
 
     ax.scatter(xs, ys, c=xs, s=(dim / 8) ** 2, lw=0,
-               cmap=create_ciecam02_cmap(), vmin=0, vmax=2 * np.pi)
+               cmap=ciecam02_cmap(), vmin=0, vmax=2 * np.pi)
 
     ax.set_yticks(())
     ax.tick_params(axis='x', colors=text_color)
@@ -566,9 +779,12 @@ def show_phase_colors_circle(ax=None, add_dark_background=True,
 
     if add_dark_background:
         dark = '#3A404C'
-        fig.patch.set_facecolor(dark)
+        # fig.patch.set_facecolor(dark)
         ax.patch.set_facecolor(dark)
         text_color = dark
+    else:
+        fig.patch.set_facecolor('white')
+        text_color = 'black'
 
     #Plot a color mesh on the polar plot
     #with the color set by the angle
@@ -576,12 +792,12 @@ def show_phase_colors_circle(ax=None, add_dark_background=True,
     n = 180  #the number of secants for the mesh
     t = np.linspace(0, 2 * np.pi, n)  # theta values
     r = np.linspace(0.6, 1, 2)        # radius values; change 0.6 to 0 for full circle
-    rg, tg = np.meshgrid(r, t)        # create a r,theta meshgrid
+    rg, tg = np.meshgrid(r, t)        # create r,theta meshgrid
     # c = tg                          # define color values as theta value
-    im = ax.pcolormesh(t, r, tg.T, cmap=create_ciecam02_cmap(), shading='auto')  # plot the colormesh on axis with colormap
+    im = ax.pcolormesh(t, r, tg.T, cmap=ciecam02_cmap(), shading='auto')  # plot the colormesh on axis with colormap
     ax.set_yticklabels([])            # turn off radial tick labels (yticks)
-    ax.tick_params(pad=15, labelsize=18, colors=text_color)      #cosmetic changes to tick labels
-    ax.spines['polar'].set_visible(False)    #turn off the axis spine.
+    ax.tick_params(axis='x', pad=15, labelsize=14, colors=text_color)      # cosmetic changes to tick labels
+    # ax.spines['polar'].set_visible(False)    # turn off the axis spines.
 
 
 def show_subplot(image, rows=1, cols=1, pos=1, title='', vmin=0, vmax=1,
@@ -609,13 +825,13 @@ def show_subplot_raw(image, rows=1, cols=1, pos=1, title='', ax=None,
                         hide_axes=hide_axes)
 
 
-def show_vector_plot(im_x, im_y, ax=None, color='white', scale=2):
+def show_vector_plot(im_x, im_y, ax=None, color='white', scale=2, divisor=32):
     """Create a vector plot of the phases."""
     # Get dimensions
     yd, xd = im_x.shape
 
-    X = np.linspace(xd / 32, xd * 31/32, 32, dtype=np.uint8)
-    Y = np.linspace(yd / 32, yd * 31/32, 32, dtype=np.uint8)
+    X = np.linspace(xd / divisor, xd * (divisor - 1)/divisor, divisor, dtype=np.uint8)
+    Y = np.linspace(yd / divisor, yd * (divisor - 1)/divisor, divisor, dtype=np.uint8)
 
     # Create a pair of (x, y) coordinates
     U, V = np.meshgrid(X, Y)
