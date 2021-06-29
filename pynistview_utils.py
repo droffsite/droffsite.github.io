@@ -1,4 +1,7 @@
-"""Functions for pyNISTview."""
+"""
+pynistview_utils contains utility functions for processing data captured
+by SEMPA. It is also used by the pyNISTview application.
+"""
 
 import imutils, glob, io, itertools
 
@@ -124,6 +127,11 @@ def align_and_scale(intensity_1, intensity_2, m_1, m_2, m_3, m_4,
     return results_r, results_h, h, im_matches, im_keypoints
 
 
+def calculate_distance(x1, x2):
+    """Calculate the distance between two points"""
+    return np.sqrt((x1[0] - x2[0])**2 + (x1[1] - x2[1])**2)
+
+
 def clean_image(image, sigma=50, h=25):
     """Remove gradient and noise from image."""
     # Rescale to 0..255 for filters
@@ -210,6 +218,73 @@ def find_com(img_1, img_2, img_3=None):
     return x_cm, y_cm
 
 
+def find_group_contours(contours):
+    """Find groupings of circular contours."""
+
+    boxes, centers = get_bounding_boxes(contours)
+
+    # Determine total number of contours
+    count = len(centers)
+
+    # Create a matrix of distances between contours
+    distances = np.asarray([[calculate_distance(centers[i], centers[j])
+                             for j in range(count)] for i in range(count)])
+
+    groups = []
+    loners = []
+    indices = list(range(0, len(boxes)))
+
+    while len(indices) > 0:
+        # Take the first index in the list
+        index = indices[0]
+        # print(f'{len(indices)} indices remaining')
+
+        neighbors = find_neighbors_for([index], boxes, distances)
+        # print(f'Looking at {index}, found {neighbors}')
+
+        # Examine results and pare down the list of indices
+        if len(neighbors) == 1:
+            # Found a loner. Note this might end up in a group if it's within a larger contour's neighborhood.
+            loners.append(neighbors)
+            indices = [i for i in indices if i not in list(
+                itertools.chain.from_iterable(loners))]
+        else:
+            # Found a group.
+            groups.append(neighbors)
+            indices = [i for i in indices if i not in list(
+                itertools.chain.from_iterable(groups))]
+
+    return groups, loners
+    
+
+def find_neighbors_for(indices, boxes, distances, neighbors=[], threshold=2):
+    """Find nearest neighbors in to incoming indices."""
+
+    # Add the indices to list of neighbors, eliminating duplicates
+    neighbors = np.unique(np.concatenate((neighbors, indices))).astype(int)
+
+    for index in indices:
+        box = np.asarray(boxes[index])
+        dists = distances[index]
+
+        # Use threshold to determine what's considered close.
+        d = np.max(box[2:]) * threshold
+
+        # Find all boxes between 0 exclusive (ignore box being 0 from itself) and d,
+        # eliminating duplicates
+        new_indices = np.squeeze(np.where(np.logical_and(0 < dists, dists <= d)))
+        new_indices = [i for i in new_indices if i not in neighbors]
+
+        # print(f'Looking at {index}, found {new_indices} with neighbors {neighbors}')
+
+        # Recursively call self to follow leads
+        neighbors = np.unique(np.concatenate((neighbors,
+                                              find_neighbors_for(new_indices,
+                                                                 boxes, distances, neighbors))))
+
+    return neighbors.tolist()
+    
+    
 def find_offsets(img_1, img_2, img_3=None):
     """Minimize the min to max spread of the images to get most consistent magnitude."""
     # Find a reasonable starting point
@@ -257,6 +332,15 @@ def fit_image(image, mask=None):
     image_fit_masked = image_fit * mask
 
     return image_fit, image_fit_masked
+
+
+def get_bounding_boxes(contours):
+    """Return the bounding boxes for the passed in contours"""
+    boxes = [cv2.boundingRect(contour) for contour in contours]
+    centers = [(x + int(x_ext / 2), y + int(y_ext / 2))
+                for x, y, x_ext, y_ext in boxes]
+
+    return boxes, centers
 
 
 def get_file_key(file_path, key):
@@ -585,6 +669,40 @@ def segment_image(image, segments=1, adaptive=False, sel=circle_array(1),
     return image_thresh, image_shift, masks
 
 
+def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=True, alpha=1, color='black'):
+    """Plot all circular contours."""
+    # Convert img to color and draw the contours
+    c_img = cv2.cvtColor(np.zeros_like(img, dtype=np.uint8), cv2.COLOR_GRAY2RGB)
+    cv2.drawContours(c_img, contours, -1, (255, 255, 255), 1)
+
+    # Convert resultant image back to grayscale to produce a mask
+    c_img_gray = cv2.cvtColor(c_img, cv2.COLOR_RGB2GRAY)
+    masked_circles = np.ma.masked_where(c_img_gray == 0, c_img_gray)
+
+    # Use the mask to produce an RBGA image (transparent background)
+    c_img_rgba = cv2.cvtColor(c_img, cv2.COLOR_RGB2RGBA)
+    c_img_rgba[:, :, 3] = masked_circles
+    
+    boxes, centers = get_bounding_boxes(contours)
+    if reverse:
+        boxes = boxes[::-1]
+
+    if ax is not None:
+        cmap_to_show = cm.binary_r if color == 'black' else cm.binary
+        ax.imshow(masked_circles, interpolation='none', alpha=alpha, cmap=cmap_to_show)
+    
+        if show_numbers:
+            index = 1
+
+            for box in boxes:
+                ax.text(centers[index - 1][0], centers[index - 1][1], index, 
+                        alpha=alpha, color=color,
+                        horizontalalignment='center', verticalalignment='center')
+                index += 1
+
+    return masked_circles, c_img_rgba, boxes
+
+
 def show_circles(magnitudes, phis, thetas, contours, scale,
                  show_numbers=True, reverse=True, alpha=1, show='phis',
                  normalize=True, show_both=False, phis_m=None,
@@ -666,7 +784,8 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
 
         if show_numbers:
             c = 'black' if not candidate else 'blue'
-            label = index if not candidate else f'{index}*'
+            label = index if not candidate else fr'{index}$\circlearrowright$' \
+                if dev_avg < np.pi / 2 else fr'{index}$\circlearrowleft$'
 
             t = ax.text(0, 0, label, fontdict={'fontsize': 20}, c=c,
                     horizontalalignment='left', verticalalignment='top');
@@ -707,40 +826,6 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
         index += 1
 
     return candidates
-
-
-def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=True, alpha=1, color='black'):
-    """Plot all circular contours."""
-    # Convert img to color and draw the contours
-    c_img = cv2.cvtColor(np.zeros_like(img, dtype=np.uint8), cv2.COLOR_GRAY2RGB)
-    cv2.drawContours(c_img, contours, -1, (255, 255, 255), 1)
-
-    # Convert resultant image back to grayscale to produce a mask
-    c_img_gray = cv2.cvtColor(c_img, cv2.COLOR_RGB2GRAY)
-    masked_circles = np.ma.masked_where(c_img_gray == 0, c_img_gray)
-
-    # Use the mask to produce an RBGA image (transparent background)
-    c_img_rgba = cv2.cvtColor(c_img, cv2.COLOR_RGB2RGBA)
-    c_img_rgba[:, :, 3] = masked_circles
-    
-    boxes = [cv2.boundingRect(contour) for contour in contours]
-    if reverse:
-        boxes = boxes[::-1]
-
-    if ax is not None:
-        cmap_to_show = cm.binary_r if color == 'black' else cm.binary
-        ax.imshow(masked_circles, interpolation='none', alpha=alpha, cmap=cmap_to_show)
-    
-        if show_numbers:
-            index = 1
-
-            for box in boxes:
-                xmin, ymin, extent_x, extent_y = box
-                ax.text(xmin + extent_x / 2, ymin + extent_y / 2, index, alpha=alpha, color=color,
-                        horizontalalignment='center', verticalalignment='center')
-                index += 1
-
-    return masked_circles, c_img_rgba, boxes
 
 
 def show_phase_colors_circle_old(ax=None, add_dark_background=True,
