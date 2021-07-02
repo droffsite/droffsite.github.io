@@ -23,9 +23,10 @@ from colorspacious import cspace_convert
 import cv2
 from scipy.signal.signaltools import fftconvolve
 
-from selelems import circle_array
+from selelems import circle_array, diamond_array
 
 sempa_file_suffix = 'sempa'
+scale_multiplier = 10e8
 
 
 def add_colorbar(img, ax, label='', cmap='gray'):
@@ -62,7 +63,8 @@ def align_and_scale(intensity_1, intensity_2, m_1, m_2, m_3, m_4,
     matches.sort(key=lambda x: x.distance, reverse=False)
 
     # Remove not so good matches
-    num_good_matches = int(len(matches) * match_percent)
+    num_good_matches = np.max([int(len(matches) * match_percent), 4])
+    print(f'Found {len(matches)} matches; keeping {num_good_matches}.')
     matches = matches[:num_good_matches]
 
     # Draw top matches
@@ -97,18 +99,24 @@ def align_and_scale(intensity_1, intensity_2, m_1, m_2, m_3, m_4,
 #                     0] + h[0, 2]).astype(int)
     
     # Find the contour of the image
-    cnts = np.squeeze(cv2.findContours(rescale_to_8_bit(intensity_1_h), cv2.RETR_EXTERNAL,
-                            cv2.CHAIN_APPROX_SIMPLE)[-2])
+    cnts = cv2.findContours(rescale_to_8_bit(intensity_1_h), cv2.RETR_TREE,
+                            cv2.CHAIN_APPROX_SIMPLE)[-2]
+    # print(f'Found {len(cnts)} contours with shape{np.asarray([0]).shape}:\n{cnts}')
+    cnts = np.squeeze(cnts[0])
+    # print(f'Squeezed contour:\n{cnts}')
 
     # Find the center point of the contour
     t_x, t_y = np.mean(cnts[:,0]), np.mean(cnts[:,1])
+    print(f'Found image center: ({t_x:.1f}, {t_y:.1f})')
     
     # Now measure the distance to each point in the contour from the center for quadrants
     # 2 and 3 (top left and bottom left)
     q2 = np.squeeze([point for point in cnts if point[0] < t_x and point[1] < t_y])
+    # print(f'Points in quadrant 2: {q2}')
     dists_q2 = [np.sqrt((pt[0] - t_x) ** 2 + (pt[1] - t_y) ** 2) for pt in q2]
 
     q3 = np.squeeze([point for point in cnts if point[0] < t_x and point[1] > t_y])
+    # print(f'Points in quadrant 3: {q3}')
     dists_q3 = [np.sqrt((pt[0] - t_x) ** 2 + (pt[1] - t_y) ** 2) for pt in q3]
 
     # The top left and bottom left points will be the points in the quadrants with the greatest
@@ -158,7 +166,13 @@ def ciecam02_cmap():
     return mpl.colors.ListedColormap(color_circle_rgb)
 
 
-def find_circular_contours(img, diff_axes_threshold=8, comparator='gt'):
+def file_for(files, token):
+    """Convenience method for extracting file locations"""
+
+    return files[[i for i, item in enumerate(files) if token in item]][0]
+
+
+def find_circular_contours(img, diff_axes_threshold=0.3, comparator='gt'):
     """Return an array of circular contours found in the input image. Also return the full array of contours."""
     circle_contours = []
 
@@ -167,7 +181,19 @@ def find_circular_contours(img, diff_axes_threshold=8, comparator='gt'):
         np.where(img < img.mean(), 255, 0)
     
     # OpenCV requires unsigned ints
-    ups = ups.astype(np.uint8)
+    ups_b = ups.astype(np.uint8)
+    plt.figure(figsize=(12, 6))
+    plt.subplot(121)
+    plt.imshow(ups_b, cmap='gray')
+    kernel = circle_array(3)
+    ups = cv2.morphologyEx(ups_b, cv2.MORPH_CLOSE, kernel)
+    # iters = 1
+    # ups = cv2.dilate(ups, kernel, iterations=iters)
+    # plt.figure(figsize=(6, 6))
+    # plt.imshow(ups, cmap='gray')
+    # ups = cv2.erode(ups, kernel, iterations=iters)
+    plt.subplot(122)
+    plt.imshow(ups, cmap='gray')
     xdim, ydim = ups.shape[1], ups.shape[0]
 
     # Find all contours
@@ -182,19 +208,13 @@ def find_circular_contours(img, diff_axes_threshold=8, comparator='gt'):
         # Fit the contour to an ellipse. This requires there be at least 5 points in the contour
         # (thus the if). Throw out anything where the major and minor axes are different by more
         # than the threshold
-        diff_radii = cv2.fitEllipse(contour)[1] if len(contour) > 4 else [diff_axes_threshold + 1, 0]
-        diff = np.abs(diff_radii[0] - diff_radii[1])
+        width, height = cv2.fitEllipse(contour)[1] if len(contour) > 4 else [diff_axes_threshold + 1, 0]
+        diff = np.abs(width - height)
 
-        if diff < diff_axes_threshold:
+        if diff < np.max([width, height]) * diff_axes_threshold:
             circle_contours.append(contour)
             
-    return circle_contours, contours
-
-
-def file_for(files, token):
-    """Convenience method for extracting file locations"""
-
-    return files[[i for i, item in enumerate(files) if token in item]][0]
+    return circle_contours[::-1], contours_g, contours
 
 
 def find_com(img_1, img_2, img_3=None):
@@ -237,25 +257,17 @@ def find_group_contours(contours):
     while len(indices) > 0:
         # Take the first index in the list
         index = indices[0]
-        # print(f'{len(indices)} indices remaining')
-
         neighbors = find_neighbors_for([index], boxes, distances)
-        # print(f'Looking at {index}, found {neighbors}')
 
         # Examine results and pare down the list of indices
-        if len(neighbors) == 1:
-            # Found a loner. Note this might end up in a group if it's within a larger contour's neighborhood.
-            loners.append(neighbors)
-            indices = [i for i in indices if i not in list(
-                itertools.chain.from_iterable(loners))]
-        else:
-            # Found a group.
-            groups.append(neighbors)
-            indices = [i for i in indices if i not in list(
-                itertools.chain.from_iterable(groups))]
+        found = loners if len(neighbors) == 1 else groups
+            
+        found.append(neighbors)
+        indices = [i for i in indices if i not in list(
+                itertools.chain.from_iterable(found))]
 
     return groups, loners
-    
+
 
 def find_neighbors_for(indices, boxes, distances, neighbors=[], threshold=2):
     """Find nearest neighbors in to incoming indices."""
@@ -272,7 +284,7 @@ def find_neighbors_for(indices, boxes, distances, neighbors=[], threshold=2):
 
         # Find all boxes between 0 exclusive (ignore box being 0 from itself) and d,
         # eliminating duplicates
-        new_indices = np.squeeze(np.where(np.logical_and(0 < dists, dists <= d)))
+        new_indices = np.atleast_1d(np.squeeze(np.where(np.logical_and(0 < dists, dists <= d))))
         new_indices = [i for i in new_indices if i not in neighbors]
 
         # print(f'Looking at {index}, found {new_indices} with neighbors {neighbors}')
@@ -398,22 +410,32 @@ def get_phases(im_x, im_y, im_z=None):
 def get_phi_diff(path, phis):
     """Determine the average angle of magnetization relative to the
        contour it circles."""
-    # Determine the angle along the path from point to point, looping
-    # from the end to the beginning
-    dydx = np.array([(np.arctan2(-(path[i][1] - path[i - 1][1]), 
-                      path[i][0] - path[i - 1][0])) for i in range(1, len(path))])
-    dydx = np.append(dydx, np.arctan2(
-        path[0][1] - path[-1][1], path[0][0] - path[-1][0]))
+
+    # Determine the angle along the path from point to point
+    path_diff = np.roll(path, -2) - path
+
+    # Flip the sign of y for matplotlib (y=0 is at the top)
+    path_angle = np.arctan2(-path_diff[:, 1], path_diff[:, 0])
 
     # Collect the phis along the path and subtract them from the path angles
     phis_path = np.array([phis[point[1], point[0]] for point in path])
+
     # Adjust to keep the range -pi to pi
     phis_path = np.where(phis_path > np.pi, phis_path - 2 * np.pi, phis_path)
 
-    phis_diff = phis_path - dydx
+    phis_diff = phis_path - path_angle
     phis_diff = np.where(phis_diff < -np.pi, phis_diff + 2 * np.pi, phis_diff)
+    phis_diff = np.where(phis_diff > np.pi, phis_diff - 2 * np.pi, phis_diff)
 
-    return np.mean(phis_diff), np.std(phis_diff)
+    # Calculate alpha per JC's definition: deviation from domain wall normal traveling
+    # from low M_z to high M_z. Alpha ranges from 0 to 2 pi.
+    alphas = phis_diff + np.pi / 2
+    # alphas = np.where(alphas < 0, alphas + 2 * np.pi, alphas)
+
+    # print(f'\N{greek small letter phi}: {np.min(phis_diff):.2f} to {np.max(phis_diff):.2f}; '\
+    #       f'\N{greek small letter alpha}: {np.min(alphas):.2f} to {np.max(alphas):.2f}')
+
+    return np.mean(phis_diff), np.std(phis_diff), np.mean(alphas), np.std(alphas)
 
 
 def get_scale(file_path):
@@ -426,7 +448,7 @@ def get_scale(file_path):
 
     adjusted_scale = full_scale / magnification / dim
 
-    return adjusted_scale
+    return adjusted_scale, magnification
 
 
 def image_data(file_path):
@@ -481,7 +503,9 @@ def import_files(name, runs, indir):
         image_dict[key].extend(m.shape)
         image_dict[key].extend([m.min(), m.max()])
 
-    image_dict['scale'] = get_scale(files[0])
+    scale, magnification = get_scale(files[0])
+    image_dict['scale'] = scale
+    image_dict['magnification'] = magnification
     
     return image_dict
 
@@ -669,8 +693,12 @@ def segment_image(image, segments=1, adaptive=False, sel=circle_array(1),
     return image_thresh, image_shift, masks
 
 
-def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=True, alpha=1, color='black'):
+def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, alpha=1, color='black'):
     """Plot all circular contours."""
+
+    if reverse:
+        contours = contours[::-1]
+
     # Convert img to color and draw the contours
     c_img = cv2.cvtColor(np.zeros_like(img, dtype=np.uint8), cv2.COLOR_GRAY2RGB)
     cv2.drawContours(c_img, contours, -1, (255, 255, 255), 1)
@@ -684,8 +712,6 @@ def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=True, al
     c_img_rgba[:, :, 3] = masked_circles
     
     boxes, centers = get_bounding_boxes(contours)
-    if reverse:
-        boxes = boxes[::-1]
 
     if ax is not None:
         cmap_to_show = cm.binary_r if color == 'black' else cm.binary
@@ -704,9 +730,9 @@ def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=True, al
 
 
 def show_circles(magnitudes, phis, thetas, contours, scale,
-                 show_numbers=True, reverse=True, alpha=1, show='phis',
+                 show_numbers=True, reverse=False, alpha=0.5, show='thetas',
                  normalize=True, show_both=False, phis_m=None,
-                 candidate_cutoff=0.5235987756):
+                 candidate_cutoff=np.pi / 6):
     """Plot all circular contours."""
     masked_circles, _, boxes = show_all_circles(thetas, contours, reverse=reverse)
     count = len(boxes)
@@ -717,22 +743,16 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
     num_rows = np.ceil(total_count / num_columns).astype(int)
     yd, xd = magnitudes.shape
 
-    colors = itertools.cycle(['red', 'yellow', 'green', 'blue'])
-
     extent_factor = 0.3
     index = 1
 
     # Track candidates. Cutoff of pi/6 allows for 3 sigma.
     candidates = {}
+    all_contours = {}
 
     plt.figure(figsize=(num_columns * column_width, num_rows * column_width));
 
     for box in boxes:
-        path = np.squeeze(contours[count - index])#[::-1]
-        num_pts = len(path)
-        pts = [path[0], path[int(num_pts / 4)], path[int(num_pts / 2)],
-               path[int(3 * num_pts / 4)]]
-
         xmin, ymin, width, height = box
         extent_x, extent_y = int(extent_factor * width), int(extent_factor * height)
         extent = np.min([extent_x, extent_y])
@@ -754,12 +774,17 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
         X, Y = np.meshgrid(x, y)
 
         # Create vector lengths
-        if normalize:
-            U = np.ones_like(m_subset)
-            V = np.ones_like(m_subset)
-        else:
-            U = m_subset * np.cos(p_subset) * np.sin(t_subset)
-            V = m_subset * np.sin(p_subset) * np.sin(t_subset)
+        # if normalize:
+        #     U = np.ones_like(m_subset)
+        #     V = np.ones_like(m_subset)
+        # else:
+        #     U = m_subset * np.cos(p_subset) * np.sin(t_subset)
+        #     V = m_subset * np.sin(p_subset) * np.sin(t_subset)
+
+        U = np.ones_like(m_subset) if normalize else m_subset * \
+            np.cos(p_subset) * np.sin(t_subset)
+        V = np.ones_like(m_subset) if normalize else m_subset * \
+            np.sin(p_subset) * np.sin(t_subset)
 
         index_to_show = index if not show_both else 2 * index - 1
         ax = plt.subplot(num_rows, num_columns, index_to_show)
@@ -768,24 +793,33 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
         ax.imshow(masked_circles[ymin:ymax, xmin:xmax], interpolation='none', alpha=alpha)
         ax.add_artist(ScaleBar(scale, box_alpha=0.8))
 
-        dev_avg, dev_std = get_phi_diff(path, phis)
+        path = np.squeeze(contours[index - 1])
+
+        dev_avg, dev_std, alpha_avg, alpha_std = get_phi_diff(path, phis)
         candidate = dev_std <= candidate_cutoff
+
+        all_contours[index] = [dev_avg, dev_std, alpha_avg, alpha_std]
         if candidate:
-            candidates[index] = [dev_avg, dev_std]
+            candidates[index] = [dev_avg, dev_std, alpha_avg, alpha_std]
         
         title = f'({xmin}, {ymin}) to ({xmax}, {ymax}), ' \
-                f'{int(width * scale * 10e8)}x{int(height * scale * 10e8)} nm, ' \
+                f'{int(width * scale * scale_multiplier)}x{int(height * scale * scale_multiplier)} nm\n' \
+               rf'$\alpha:\ {alpha_avg:.3f},\ \sigma_{{\alpha}}:\ {alpha_std:.2f}\quad $' \
                rf'$\phi_{{dev}}:\ {dev_avg:.3f},\ \sigma_{{dev}}:\ {dev_std:.2f}$'
 
         ax.set_title(title)
 
+        colors = itertools.cycle(['red', 'yellow', 'green', 'blue'])
+        num_pts = len(path)
+        pts = [path[0], path[int(num_pts / 4)], path[int(num_pts / 2)],
+               path[int(3 * num_pts / 4)]]
         for point in pts:
             ax.scatter(point[0] - xmin, point[1] - ymin, c=next(colors))
 
         if show_numbers:
             c = 'black' if not candidate else 'blue'
             label = index if not candidate else fr'{index}$\circlearrowright$' \
-                if dev_avg < np.pi / 2 else fr'{index}$\circlearrowleft$'
+                if alpha_avg < np.pi else fr'{index}$\circlearrowleft$'
 
             t = ax.text(0, 0, label, fontdict={'fontsize': 20}, c=c,
                     horizontalalignment='left', verticalalignment='top');
@@ -825,7 +859,73 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
             
         index += 1
 
-    return candidates
+    return candidates, all_contours
+
+
+def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True):
+    """Plot groups of circular contours"""
+    groups, _ = find_group_contours(contours)
+
+    group_count = len(groups)
+
+    # print(f'{group_count} groups:\n{groups}\n\n{len(loners)} loners:\n{loners}')
+    contour_groups = [[np.concatenate(
+        [np.squeeze(c) for c in [contours[i] for i in g]])] for g in groups]
+
+    boxes_g = [get_bounding_boxes(cg) for cg in contour_groups]
+
+    col_width = 12
+    num_cols = 1
+    num_rows = np.ceil(group_count / num_cols).astype(int)
+
+    plt.figure(figsize=(num_cols * col_width, num_rows * col_width))
+    masked_circles, _, _ = show_all_circles(thetas, contours)
+
+    for index in range(group_count):
+        box, group = boxes_g[index], groups[index]
+        xmin, ymin, width, height = np.squeeze(box[0])
+        xmax, ymax = xmin + width, ymin + height
+        box_xd, box_yd = xmax - xmin, ymax - ymin
+
+        _, centers = get_bounding_boxes([contours[i] for i in group])
+
+        m_subset = magnitudes[ymin:ymax, xmin:xmax]
+        p_subset = phis[ymin:ymax, xmin:xmax]
+        t_subset = thetas[ymin:ymax, xmin:xmax]
+
+        x = np.linspace(1, box_xd - 2, box_xd, dtype=np.uint8)
+        y = np.linspace(1, box_yd - 2, box_yd, dtype=np.uint8)
+        X, Y = np.meshgrid(x, y)
+
+        # Create vector lengths
+        U = np.ones_like(m_subset) if normalize else m_subset * \
+            np.cos(p_subset) * np.sin(t_subset)
+        V = np.ones_like(m_subset) if normalize else m_subset * \
+            np.sin(p_subset) * np.sin(t_subset)
+
+        ax = plt.subplot(num_rows, num_cols, index + 1)
+        ax.imshow(thetas[ymin:ymax, xmin:xmax], cmap=cm.coolwarm_r, alpha=0.8)
+        ax.imshow(masked_circles[ymin:ymax, xmin:xmax],
+                interpolation='none', alpha=0.5)
+        ax.quiver(X, Y, U, V, units='dots',
+                angles=p_subset * 180 / np.pi, pivot='mid')
+
+        for l_index in range(len(centers)):
+            label = group[l_index] + 1
+            t = ax.text(centers[l_index][0] - xmin, centers[l_index][1] - ymin, label,
+                        alpha=1, color='black',
+                        horizontalalignment='center', verticalalignment='center')
+            t.set_bbox(dict(facecolor='white', alpha=0.65, edgecolor='black'))
+
+        span = 5
+        ax.set_xticks(x[::span])
+        ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
+        ax.set_yticks(y[::span])
+        ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
+
+        title = f'({xmin}, {ymin}) to ({xmax}, {ymax}), ' \
+            f'{int(width * scale * scale_multiplier)}x{int(height * scale * scale_multiplier)} nm\n'
+        ax.set_title(title)
 
 
 def show_phase_colors_circle_old(ax=None, add_dark_background=True,
