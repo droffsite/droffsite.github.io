@@ -200,9 +200,9 @@ def find_circular_contours(img, diff_axes_threshold=0.3, comparator='gt'):
     contours = cv2.findContours(ups, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)[-2]
 
     # Remove the contours that are on the edges
-    contours_g = (contour for contour in contours \
+    contours_g = [contour for contour in contours \
                   if 0 not in contour and xdim - 1 not in contour[:, :, 0] \
-                  and ydim - 1 not in contour[:, :, 1])
+                  and ydim - 1 not in contour[:, :, 1]]
 
     for contour in contours_g:
         # Fit the contour to an ellipse. This requires there be at least 5 points in the contour
@@ -214,7 +214,7 @@ def find_circular_contours(img, diff_axes_threshold=0.3, comparator='gt'):
         if diff < np.max([width, height]) * diff_axes_threshold:
             circle_contours.append(contour)
             
-    return circle_contours[::-1], contours_g, contours
+    return circle_contours[::-1], contours_g[::-1], contours[::-1]
 
 
 def find_com(img_1, img_2, img_3=None):
@@ -729,6 +729,76 @@ def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, a
     return masked_circles, c_img_rgba, boxes
 
 
+def show_alphas(contours_g, circular_contours, phis, name, ltem_data=None):
+    all_alphas = np.asarray([get_phi_diff(np.squeeze(c), phis)
+                            for c in contours_g])
+
+    circle_alphas = np.asarray([get_phi_diff(np.squeeze(c), phis)
+                            for c in circular_contours])
+
+    bins = 20
+    colors = {'all': 'blue', 'circles': 'orange', 'ltem': 'green'}
+
+    p = [0., 0.1, 0.75, 0.1, 0., 0.01, 0.03, 0.01, 0]
+    ltem_data = np.random.choice(
+        np.arange(0, 2.25 * np.pi, np.pi / 4), len(all_alphas), p=p) \
+        if ltem_data is None else ltem_data
+
+    fig = plt.figure(figsize=(10, 5))
+    hist_all = plt.hist(all_alphas[:, 2], bins=bins, color=colors['all'],
+                        alpha=0.5, histtype='step', density=True, label='SEMPA (all)')
+    hist_circle = plt.hist(circle_alphas[:, 2], bins=bins, color=colors['circles'], 
+                           alpha=0.5, density=True, label='SEMPA (circular)')
+    hist_ltem = plt.hist(ltem_data, bins=bins, color=colors['ltem'], alpha=0.5,
+                        histtype='stepfilled', density=True, label='LTEM')
+
+    lbin_all = np.argmax(hist_all[0])
+    lbin_ltem = np.argmax(hist_ltem[0])
+
+    tops_circle = sorted(np.unique(np.around(hist_circle[0], 4)), reverse=True)[:2]
+    lbin_circle = [np.where(np.around(hist_circle[0], 4) == t)
+                for t in tops_circle]
+
+    mode_all = (hist_all[1][lbin_all + 1] + hist_all[1][lbin_all]) / 2
+    mode_ltem = (hist_ltem[1][lbin_ltem + 1] + hist_ltem[1][lbin_ltem]) / 2
+
+    mode_circle = (hist_circle[1][lbin_circle[0][0][-1] + 1] +
+                hist_circle[1][lbin_circle[0][0][0]]) / 2
+    mode_circle_2 = (hist_circle[1][lbin_circle[1][0]
+                    [-1] + 1] + hist_circle[1][lbin_circle[1][0][0]]) / 2
+
+    plt.axvline(mode_all, linestyle='dashed', linewidth=1, color=colors['all'])
+    plt.axvline(mode_circle, linestyle='dashed',
+                linewidth=1, color=colors['circles'])
+    plt.axvline(mode_circle_2, linestyle='dashed',
+                linewidth=1, color=colors['circles'])
+    plt.axvline(mode_ltem, linestyle='dashed',
+                linewidth=1, color=colors['ltem'])
+
+    _, y_lim = plt.ylim()
+    shift_x = 1.05
+    t = plt.text(mode_all * shift_x, y_lim * 0.7, f'{mode_all:.2f}')
+    t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=colors['all']))
+    t = plt.text(mode_circle * shift_x, y_lim * 0.9, f'{mode_circle:.2f}')
+    t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=colors['circles']))
+    t = plt.text(mode_circle_2 * shift_x, y_lim * 0.9, f'{mode_circle_2:.2f}')
+    t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=colors['circles']))
+    t = plt.text(mode_ltem * shift_x, y_lim * 0.7, f'{mode_ltem:.2f}')
+    t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=colors['ltem']))
+
+    plt.xlim(0, 2 * np.pi)
+
+    tick_labels = ['0', r'$\frac{\pi}{4}$', r'$\frac{\pi}{2}$', r'$\frac{3\pi}{4}$',
+                r'$\pi$', r'$\frac{5\pi}{4}$', r'$\frac{3\pi}{2}$', r'$\frac{7\pi}{4}$', r'$2\pi$']
+    plt.xticks(np.arange(0, 2.25 * np.pi, step=np.pi / 4), tick_labels)
+    plt.yticks([])
+
+    plt.xlabel('Radians')
+    plt.title(rf'Average $\alpha$ for {name}')
+
+    plt.legend()
+
+
 def show_circles(magnitudes, phis, thetas, contours, scale,
                  show_numbers=True, reverse=False, alpha=0.5, show='thetas',
                  normalize=True, show_both=False, phis_m=None,
@@ -774,13 +844,6 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
         X, Y = np.meshgrid(x, y)
 
         # Create vector lengths
-        # if normalize:
-        #     U = np.ones_like(m_subset)
-        #     V = np.ones_like(m_subset)
-        # else:
-        #     U = m_subset * np.cos(p_subset) * np.sin(t_subset)
-        #     V = m_subset * np.sin(p_subset) * np.sin(t_subset)
-
         U = np.ones_like(m_subset) if normalize else m_subset * \
             np.cos(p_subset) * np.sin(t_subset)
         V = np.ones_like(m_subset) if normalize else m_subset * \
@@ -955,7 +1018,7 @@ def show_phase_colors_circle_old(ax=None, add_dark_background=True,
 def show_phase_colors_circle(ax=None, add_dark_background=True,
                              text_color='white'):
     """Plot a ring of colors for a legend."""
-   #Generate a figure with a polar projection
+   # Generate a figure with a polar projection
     if ax is None:
         fig = plt.figure()
         ax = fig.add_axes([0.1, 0.1, 0.8, 0.8], polar=True)
@@ -971,8 +1034,7 @@ def show_phase_colors_circle(ax=None, add_dark_background=True,
         fig.patch.set_facecolor('white')
         text_color = 'black'
 
-    #Plot a color mesh on the polar plot
-    #with the color set by the angle
+    # Plot a color mesh on the polar plot with the color set by the angle
 
     n = 180  #the number of secants for the mesh
     t = np.linspace(0, 2 * np.pi, n)  # theta values
@@ -1075,13 +1137,6 @@ def display_results(img_contrast_phase, img_denoised_1, img_flat_1,
 
     # Add a colorbar
     add_colorbar(img_flat_1, ax4, r'$M_{rel}$')
-    # sm = cm.ScalarMappable(cmap='gray', norm=plt.Normalize(img_flat_1.min(),
-    #                                                        img_flat_1.max()))
-    # divider = make_axes_locatable(ax4)
-    # cax = divider.append_axes('right', size='5%', pad=0.05)
-    # sm.set_array([])
-    # cbar = plt.colorbar(sm, cax=cax, orientation='vertical')
-    # cbar.set_label(r'$M_{rel}$')
 
     # Flattened M2
     ax5 = plt.subplot(gs[-1, -1])
@@ -1092,13 +1147,6 @@ def display_results(img_contrast_phase, img_denoised_1, img_flat_1,
 
     # Add a colorbar
     add_colorbar(img_flat_1, ax5, r'$M_{rel}$')
-    # sm = cm.ScalarMappable(cmap='gray', norm=plt.Normalize(img_flat_2.min(),
-    #                                                        img_flat_2.max()))
-    # divider = make_axes_locatable(ax5)
-    # cax = divider.append_axes('right', size='5%', pad=0.05)
-    # sm.set_array([])
-    # cbar = plt.colorbar(sm, cax=cax, orientation='vertical')
-    # cbar.set_label(r'$M_{rel}$')
 
     # Turn off grids and axes except for the legend plot
     for ax in fig.get_axes():
