@@ -172,7 +172,7 @@ def file_for(files, token):
     return files[[i for i, item in enumerate(files) if token in item]][0]
 
 
-def find_circular_contours(img, diff_axes_threshold=0.3, comparator='gt'):
+def find_circular_contours(img, diff_axes_threshold=0.3, comparator='gt', show=False):
     """Return an array of circular contours found in the input image. Also return the full array of contours."""
     circle_contours = []
 
@@ -182,19 +182,16 @@ def find_circular_contours(img, diff_axes_threshold=0.3, comparator='gt'):
     
     # OpenCV requires unsigned ints
     ups_b = ups.astype(np.uint8)
-    plt.figure(figsize=(12, 6))
-    plt.subplot(121)
-    plt.imshow(ups_b, cmap='gray')
     kernel = circle_array(3)
     ups = cv2.morphologyEx(ups_b, cv2.MORPH_CLOSE, kernel)
-    # iters = 1
-    # ups = cv2.dilate(ups, kernel, iterations=iters)
-    # plt.figure(figsize=(6, 6))
-    # plt.imshow(ups, cmap='gray')
-    # ups = cv2.erode(ups, kernel, iterations=iters)
-    plt.subplot(122)
-    plt.imshow(ups, cmap='gray')
     xdim, ydim = ups.shape[1], ups.shape[0]
+
+    if show:
+        plt.figure(figsize=(12, 6))
+        plt.subplot(121)
+        plt.imshow(ups_b, cmap='gray')
+        plt.subplot(122)
+        plt.imshow(ups, cmap='gray')
 
     # Find all contours
     contours = cv2.findContours(ups, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)[-2]
@@ -525,6 +522,26 @@ def mean_shift_filter(image, sp=1, sr=1):
     return rescale_to(img_shift, image)
 
 
+def process_ltem_data(ltem_data_path):
+    """Return data for .npy formatted LTEM data"""
+
+    # Data format is array of complex numbers, real = x, imaginary = y
+    ltem_data_xy = np.load(ltem_data_path)
+    ltem_data_z = np.real(
+        np.sqrt(np.ones_like(ltem_data_xy) - ltem_data_xy**2))
+
+    ltem_phases, ltem_magnitudes = get_phases(
+        np.real(ltem_data_xy), np.imag(ltem_data_xy), ltem_data_z)
+
+    ltem_circular_contours, ltem_contours_g, _ = find_circular_contours(
+        ltem_magnitudes)
+
+    ltem_alphas = np.asarray([get_phi_diff(np.squeeze(c), ltem_phases)
+                              for c in ltem_circular_contours])
+
+    return ltem_phases, ltem_magnitudes, ltem_circular_contours, ltem_contours_g, ltem_alphas
+
+
 def ptp_magnitudes(variables, image_1, image_2, image_3=None):
     """Calculate the min to max spreads for magnitudes; used for optimizing the offset."""
 
@@ -729,22 +746,23 @@ def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, a
     return masked_circles, c_img_rgba, boxes
 
 
-def show_alphas(contours_g, circular_contours, phis, name, ltem_data=None):
+def show_alphas(contours_g, circular_contours, phis, name, bins=20, ltem_data=None):
     all_alphas = np.asarray([get_phi_diff(np.squeeze(c), phis)
                             for c in contours_g])
 
     circle_alphas = np.asarray([get_phi_diff(np.squeeze(c), phis)
                             for c in circular_contours])
 
-    bins = 20
+    # Define color maps
     colors = {'all': 'blue', 'circles': 'orange', 'ltem': 'green'}
 
+    # Create a simulated phi distribution for LTEM if not provided
     p = [0., 0.1, 0.75, 0.1, 0., 0.01, 0.03, 0.01, 0]
     ltem_data = np.random.choice(
         np.arange(0, 2.25 * np.pi, np.pi / 4), len(all_alphas), p=p) \
         if ltem_data is None else ltem_data
 
-    fig = plt.figure(figsize=(10, 5))
+    plt.figure(figsize=(10, 5))
     hist_all = plt.hist(all_alphas[:, 2], bins=bins, color=colors['all'],
                         alpha=0.5, histtype='step', density=True, label='SEMPA (all)')
     hist_circle = plt.hist(circle_alphas[:, 2], bins=bins, color=colors['circles'], 
@@ -752,20 +770,26 @@ def show_alphas(contours_g, circular_contours, phis, name, ltem_data=None):
     hist_ltem = plt.hist(ltem_data, bins=bins, color=colors['ltem'], alpha=0.5,
                         histtype='stepfilled', density=True, label='LTEM')
 
+    # Find the indices of the maxima for all and LTEM
     lbin_all = np.argmax(hist_all[0])
     lbin_ltem = np.argmax(hist_ltem[0])
 
+    # Circular is a bit more complicated since it seems to have 2 big humps.
+    # First, round all values to 4 places, select unique values, and sort
+    # descending, keeping the first 2 value (top 2). Then find the indices
+    # for those values.
     tops_circle = sorted(np.unique(np.around(hist_circle[0], 4)), reverse=True)[:2]
     lbin_circle = [np.where(np.around(hist_circle[0], 4) == t)
                 for t in tops_circle]
 
+    # Now find the modes
     mode_all = (hist_all[1][lbin_all + 1] + hist_all[1][lbin_all]) / 2
     mode_ltem = (hist_ltem[1][lbin_ltem + 1] + hist_ltem[1][lbin_ltem]) / 2
 
     mode_circle = (hist_circle[1][lbin_circle[0][0][-1] + 1] +
                 hist_circle[1][lbin_circle[0][0][0]]) / 2
     mode_circle_2 = (hist_circle[1][lbin_circle[1][0]
-                    [-1] + 1] + hist_circle[1][lbin_circle[1][0][0]]) / 2
+                    [-1] + 1] + hist_circle[1][lbin_circle[1][0][-1]]) / 2
 
     plt.axvline(mode_all, linestyle='dashed', linewidth=1, color=colors['all'])
     plt.axvline(mode_circle, linestyle='dashed',
@@ -775,6 +799,7 @@ def show_alphas(contours_g, circular_contours, phis, name, ltem_data=None):
     plt.axvline(mode_ltem, linestyle='dashed',
                 linewidth=1, color=colors['ltem'])
 
+    # Place text labels for the modes
     _, y_lim = plt.ylim()
     shift_x = 1.05
     t = plt.text(mode_all * shift_x, y_lim * 0.7, f'{mode_all:.2f}')
