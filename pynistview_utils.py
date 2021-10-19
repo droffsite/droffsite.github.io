@@ -177,8 +177,11 @@ def find_circular_contours(img, diff_axes_threshold=0.3, comparator='gt', show=F
     circle_contours = []
 
     # Work on the values above (default) or below the mean
-    ups = np.where(img > img.mean(), 255, 0) if comparator == 'gt' else \
-        np.where(img < img.mean(), 255, 0)
+    threshold = img.mean()
+    # threshold = np.pi / 2
+    ups = np.where(img > threshold, 255, 0) if comparator == 'gt' else \
+        np.where(img < threshold, 255, 0)
+    # ups = np.logical_and(0.9 * np.pi / 2 <= img, img <= 1.1 * np.pi / 2)
     
     # OpenCV requires unsigned ints
     ups_b = ups.astype(np.uint8)
@@ -462,6 +465,8 @@ def import_files(name, runs, indir):
     
     image_dict = {}
 
+    print(f'Searching {name}* for runs {runs}...')
+
     # Get all the i* and m* files. Should end up with 8 of them.
 
     files = []
@@ -474,6 +479,8 @@ def import_files(name, runs, indir):
             files.extend(glob.glob(file + '*' + f + '*' + sempa_file_suffix))
             
     files = np.array(sorted(files), dtype="object")
+    fnames = [f.split('/')[-1] for f in files]
+    print(f'Found files:\n{fnames}')
 
     # ix, ix2, iy, iz
     # ix and iy are the same; similarly, ix2 and iz are the same. Ignore 2.
@@ -506,6 +513,19 @@ def import_files(name, runs, indir):
     
     return image_dict
 
+
+def limit_to(image, sigma=3):
+    """Restrict the image range to + or - sigma std deviations"""
+
+    std = np.std(image)
+    image_mean = np.mean(image)
+    image_min, image_max = image_mean - sigma * std, image_mean + sigma + std
+
+    image = np.where(image < image_min, image_min, image)
+    image = np.where(image > image_max, image_max, image)
+
+    return image
+    
 
 def mean_shift_filter(image, sp=1, sr=1):
     """Perform mean shift filtering."""
@@ -746,7 +766,7 @@ def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, a
     return masked_circles, c_img_rgba, boxes
 
 
-def show_alphas(contours_g, circular_contours, phis, name, bins=20, ltem_data=None):
+def show_alphas(contours_g, circular_contours, phis, name, show_circles_separately=True, bins=20, ltem_data=None):
     all_alphas = np.asarray([get_phi_diff(np.squeeze(c), phis)
                             for c in contours_g])
 
@@ -755,6 +775,7 @@ def show_alphas(contours_g, circular_contours, phis, name, bins=20, ltem_data=No
 
     # Define color maps
     colors = {'all': 'blue', 'circles': 'orange', 'ltem': 'green'}
+    all_hist_type = 'step' if show_circles_separately else 'stepfilled'
 
     # Create a simulated phi distribution for LTEM if not provided
     p = [0., 0.1, 0.75, 0.1, 0., 0.01, 0.03, 0.01, 0]
@@ -764,11 +785,12 @@ def show_alphas(contours_g, circular_contours, phis, name, bins=20, ltem_data=No
 
     plt.figure(figsize=(10, 5))
     hist_all = plt.hist(all_alphas[:, 2], bins=bins, color=colors['all'],
-                        alpha=0.5, histtype='step', density=True, label='SEMPA (all)')
-    hist_circle = plt.hist(circle_alphas[:, 2], bins=bins, color=colors['circles'], 
-                           alpha=0.5, density=True, label='SEMPA (circular)')
+                        alpha=0.5, histtype=all_hist_type, density=True, label='SEMPA')
+    if show_circles_separately:
+        hist_circle = plt.hist(circle_alphas[:, 2], bins=bins, color=colors['circles'], 
+                            alpha=0.5, density=True, label='SEMPA (circular)')
     hist_ltem = plt.hist(ltem_data, bins=bins, color=colors['ltem'], alpha=0.5,
-                        histtype='stepfilled', density=True, label='LTEM')
+                        density=True, label='LTEM')
 
     # Find the indices of the maxima for all and LTEM
     lbin_all = np.argmax(hist_all[0])
@@ -778,24 +800,29 @@ def show_alphas(contours_g, circular_contours, phis, name, bins=20, ltem_data=No
     # First, round all values to 4 places, select unique values, and sort
     # descending, keeping the first 2 value (top 2). Then find the indices
     # for those values.
-    tops_circle = sorted(np.unique(np.around(hist_circle[0], 4)), reverse=True)[:2]
-    lbin_circle = [np.where(np.around(hist_circle[0], 4) == t)
-                for t in tops_circle]
+    if show_circles_separately:
+        tops_circle = sorted(np.unique(np.around(hist_circle[0], 4)), reverse=True)[:2]
+        lbin_circle = [np.where(np.around(hist_circle[0], 4) == t)
+                    for t in tops_circle]
 
     # Now find the modes
     mode_all = (hist_all[1][lbin_all + 1] + hist_all[1][lbin_all]) / 2
     mode_ltem = (hist_ltem[1][lbin_ltem + 1] + hist_ltem[1][lbin_ltem]) / 2
 
-    mode_circle = (hist_circle[1][lbin_circle[0][0][-1] + 1] +
-                hist_circle[1][lbin_circle[0][0][0]]) / 2
-    mode_circle_2 = (hist_circle[1][lbin_circle[1][0]
-                    [-1] + 1] + hist_circle[1][lbin_circle[1][0][-1]]) / 2
+    if show_circles_separately:
+        mode_circle = (hist_circle[1][lbin_circle[0][0][-1] + 1] +
+                    hist_circle[1][lbin_circle[0][0][0]]) / 2
+        mode_circle_2 = (hist_circle[1][lbin_circle[1][0]
+                        [-1] + 1] + hist_circle[1][lbin_circle[1][0][-1]]) / 2
 
     plt.axvline(mode_all, linestyle='dashed', linewidth=1, color=colors['all'])
-    plt.axvline(mode_circle, linestyle='dashed',
-                linewidth=1, color=colors['circles'])
-    plt.axvline(mode_circle_2, linestyle='dashed',
-                linewidth=1, color=colors['circles'])
+
+    if show_circles_separately:
+        plt.axvline(mode_circle, linestyle='dashed',
+                    linewidth=1, color=colors['circles'])
+        plt.axvline(mode_circle_2, linestyle='dashed',
+                    linewidth=1, color=colors['circles'])
+
     plt.axvline(mode_ltem, linestyle='dashed',
                 linewidth=1, color=colors['ltem'])
 
@@ -804,10 +831,13 @@ def show_alphas(contours_g, circular_contours, phis, name, bins=20, ltem_data=No
     shift_x = 1.05
     t = plt.text(mode_all * shift_x, y_lim * 0.7, f'{mode_all:.2f}')
     t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=colors['all']))
-    t = plt.text(mode_circle * shift_x, y_lim * 0.9, f'{mode_circle:.2f}')
-    t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=colors['circles']))
-    t = plt.text(mode_circle_2 * shift_x, y_lim * 0.9, f'{mode_circle_2:.2f}')
-    t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=colors['circles']))
+
+    if show_circles_separately:
+        t = plt.text(mode_circle * shift_x, y_lim * 0.9, f'{mode_circle:.2f}')
+        t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=colors['circles']))
+        t = plt.text(mode_circle_2 * shift_x, y_lim * 0.85, f'{mode_circle_2:.2f}')
+        t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=colors['circles']))
+
     t = plt.text(mode_ltem * shift_x, y_lim * 0.7, f'{mode_ltem:.2f}')
     t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=colors['ltem']))
 
@@ -848,6 +878,16 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
     plt.figure(figsize=(num_columns * column_width, num_rows * column_width));
 
     for box in boxes:
+        # Walk along the path of the contour and measure deviations from it
+        path = np.squeeze(contours[index - 1])
+
+        dev_avg, dev_std, alpha_avg, alpha_std = get_phi_diff(path, phis)
+        candidate = dev_std <= candidate_cutoff
+
+        all_contours[index] = [dev_avg, dev_std, alpha_avg, alpha_std]
+        if candidate:
+            candidates[index] = [dev_avg, dev_std, alpha_avg, alpha_std]
+
         xmin, ymin, width, height = box
         extent_x, extent_y = int(extent_factor * width), int(extent_factor * height)
         extent = np.min([extent_x, extent_y])
@@ -880,15 +920,6 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
         ax.imshow(im_to_show, cmap=cmap_to_show)
         ax.imshow(masked_circles[ymin:ymax, xmin:xmax], interpolation='none', alpha=alpha)
         ax.add_artist(ScaleBar(scale, box_alpha=0.8))
-
-        path = np.squeeze(contours[index - 1])
-
-        dev_avg, dev_std, alpha_avg, alpha_std = get_phi_diff(path, phis)
-        candidate = dev_std <= candidate_cutoff
-
-        all_contours[index] = [dev_avg, dev_std, alpha_avg, alpha_std]
-        if candidate:
-            candidates[index] = [dev_avg, dev_std, alpha_avg, alpha_std]
         
         title = f'({xmin}, {ymin}) to ({xmax}, {ymax}), ' \
                 f'{int(width * scale * scale_multiplier)}x{int(height * scale * scale_multiplier)} nm\n' \
