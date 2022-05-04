@@ -14,7 +14,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from scipy.ndimage import gaussian_filter, median_filter
 from scipy.signal import convolve2d
-from scipy.optimize import least_squares
+from scipy.optimize import curve_fit, least_squares
 
 from netCDF4 import Dataset
 
@@ -41,11 +41,16 @@ def add_colorbar(img, ax, label='', cmap='gray'):
 
 
 def align_and_scale(intensity_1, intensity_2, m_1, m_2, m_3, m_4,
-                    features=1024, match_percent=0.15):
+                    features=512, match_percent=0.15, filter=0.78):
     im_1 = rescale_to_8_bit(intensity_1)
     im_2 = rescale_to_8_bit(intensity_2)
     im_x = rescale_to_8_bit(m_1)
     im_y = rescale_to_8_bit(m_2)
+
+    # im_1_filtered = np.where(im_1 > int(filter * np.max(im_1)), im_1, 0)
+    # im_2_filtered = np.where(im_2 > int(filter * np.max(im_2)), im_2, 0)
+    
+    im_diff = im_2 - im_1
 
     # Detect ORB features and compute descriptors.
     orb = cv2.ORB_create(features)
@@ -54,9 +59,9 @@ def align_and_scale(intensity_1, intensity_2, m_1, m_2, m_3, m_4,
     keypoints2, descriptors2 = orb.detectAndCompute(im_2, None)
 
     # Match features.
-    # matcher = cv2.DescriptorMatcher_create(
-    # cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_HAMMING)
+    # matcher = cv2.DescriptorMatcher_create(cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_HAMMING)
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    # matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
     matches = matcher.match(descriptors1, descriptors2, None)
 
     # Sort matches by score
@@ -69,9 +74,8 @@ def align_and_scale(intensity_1, intensity_2, m_1, m_2, m_3, m_4,
 
     # Draw top matches
     im_matches = cv2.drawMatches(im_1, keypoints1, im_2, keypoints2, matches,
-                                 None)
+                                 None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
     im_keypoints = cv2.drawKeypoints(im_1, keypoints1, np.array([]))
-    # cv2.imwrite("matches.jpg", imMatches)
 
     # Extract location of good matches
     points1 = np.zeros((len(matches), 2), dtype=np.float32)
@@ -80,17 +84,31 @@ def align_and_scale(intensity_1, intensity_2, m_1, m_2, m_3, m_4,
     for i, match in enumerate(matches):
         points1[i, :] = keypoints1[match.queryIdx].pt
         points2[i, :] = keypoints2[match.trainIdx].pt
+    # print(f'{points1}\n{points2}')
 
+    # lk_params = {'winSize': (19, 19), 'maxLevel': 2, 'criteria': (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 10, 0.03)};
+    
+    # p2, status, error = cv2.calcOpticalFlowPyrLK(im_1, im_2, points1, points2, **lk_params)
+    # print(p2, status, error)
     # Find homography
-    h, mask = cv2.findHomography(points1, points2, cv2.RANSAC)
+    h, mask = cv2.findHomography(
+        points1, points2, cv2.RANSAC, ransacReprojThreshold=2.0)
     # a_t = cv2.getAffineTransform(points1[:3], points2[:3])
-
+    # h = cv2.warpAffine(points1, points2)
+    # h, mask = cv2.findHomography(points1, np.float32(p2), cv2.RANSAC)
+    # h = np.array([[9.91469067e-01, -3.06551887e-04,  0],
+    #               [-1.66912051e-02,  9.97772576e-01,  0],
+    #               [-8.31626757e-05,  1.28397011e-04,  1.00000000e+00]])
+    
     # Use homography
     height, width = im_1.shape
     intensity_1_h = rescale_to(cv2.warpPerspective(im_1, h, (width, height)),
                                intensity_1)
+    # intensity_1_h = rescale_to(cv2.warpAffine(
+    #     im_1, a_t, (width, height)), im_1)
     m_1_h = rescale_to(cv2.warpPerspective(im_x, h, (width, height)), m_1)
     m_2_h = rescale_to(cv2.warpPerspective(im_y, h, (width, height)), m_2)
+    plt.imshow(intensity_1_h, cmap='gray')
 
     # Figure out translation of homographies
 #     first_x_y = (h[0, 2]).astype(int)
@@ -103,32 +121,43 @@ def align_and_scale(intensity_1, intensity_2, m_1, m_2, m_3, m_4,
                             cv2.CHAIN_APPROX_SIMPLE)[-2]
     # print(f'Found {len(cnts)} contours with shape{np.asarray([0]).shape}:\n{cnts}')
     cnts = np.squeeze(cnts[0])
-    # print(f'Squeezed contour:\n{cnts}')
+    # print(cnts)
 
     # Find the center point of the contour
     t_x, t_y = np.mean(cnts[:,0]), np.mean(cnts[:,1])
-    print(f'Found image center: ({t_x:.1f}, {t_y:.1f})')
+    # print(f'Found image center: ({t_x:.1f}, {t_y:.1f})')
     
     # Now measure the distance to each point in the contour from the center for quadrants
-    # 2 and 3 (top left and bottom left)
-    q2 = np.squeeze([point for point in cnts if point[0] < t_x and point[1] < t_y])
-    # print(f'Points in quadrant 2: {q2}')
+    # 1 through 4 (top right, top left, bottom left, bottom right, respectively)
+    # q2 = np.squeeze([point for point in cnts if point[0] < t_x and point[1] < t_y])
+    q1 = [point for point in cnts if point[0] > t_x and point[1] < t_y]
+    q2 = [point for point in cnts if point[0] < t_x and point[1] < t_y]
+    q3 = [point for point in cnts if point[0] < t_x and point[1] > t_y]
+    q4 = [point for point in cnts if point[0] > t_x and point[1] > t_y]
+ 
+    dists_q1 = [np.sqrt((pt[0] - t_x) ** 2 + (pt[1] - t_y) ** 2) for pt in q1]
     dists_q2 = [np.sqrt((pt[0] - t_x) ** 2 + (pt[1] - t_y) ** 2) for pt in q2]
-
-    q3 = np.squeeze([point for point in cnts if point[0] < t_x and point[1] > t_y])
-    # print(f'Points in quadrant 3: {q3}')
     dists_q3 = [np.sqrt((pt[0] - t_x) ** 2 + (pt[1] - t_y) ** 2) for pt in q3]
+    dists_q4 = [np.sqrt((pt[0] - t_x) ** 2 + (pt[1] - t_y) ** 2) for pt in q4]
 
     # The top left and bottom left points will be the points in the quadrants with the greatest
     # distances.
     top_left, bottom_left = q2[np.argmax(dists_q2)], q3[np.argmax(dists_q3)]
+    top_right, bottom_right = q1[np.argmax(dists_q1)], q4[np.argmax(dists_q4)]
+    print(
+        f'Top left: {top_left}, Top right: {top_right}\nBottom left: {bottom_left}, Bottom right: {bottom_right}')
 
-    x_min = np.max((np.min(bottom_left[0]), np.max(top_left[0])))
-    y_min = top_left[1]
-    y_max = bottom_left[1]
+    # x_min = np.max((np.min(bottom_left[0]), np.max(top_left[0])))
+    # y_min = top_left[1]
+    # y_max = bottom_left[1]
+    x_min, x_max = np.max((top_left[0], bottom_left[0])), np.min(
+        (top_right[0], bottom_right[0]))
+    y_min, y_max = np.max((top_left[1], top_right[1])), np.min(
+        (bottom_right[1], bottom_right[1]))
+    print(f'Cropping ({x_min}, {y_min}) to ({x_max}, {y_max})')
 
     # Crop the original images so they all cover the same area
-    results_r = [img[y_min:y_max, x_min:] for img in
+    results_r = [img[y_min:y_max, x_min:x_max] for img in
                  (intensity_1_h, intensity_2, m_1_h, m_2_h, m_3, m_4)]
     results_h = (intensity_1_h, m_1_h, m_2_h)
 
@@ -197,12 +226,14 @@ def find_circular_contours(img, diff_axes_threshold=0.3, comparator='gt', show=F
         plt.imshow(ups, cmap='gray')
 
     # Find all contours
-    contours = cv2.findContours(ups, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)[-2]
+    contours, _ = cv2.findContours(ups, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    print(np.asarray(contours).shape)
 
     # Remove the contours that are on the edges
     contours_g = [contour for contour in contours \
                   if 0 not in contour and xdim - 1 not in contour[:, :, 0] \
-                  and ydim - 1 not in contour[:, :, 1]]
+                  and ydim - 1 not in contour[:, :, 1] \
+                  and len(np.squeeze(contour).shape) == 2]
 
     for contour in contours_g:
         # Fit the contour to an ellipse. This requires there be at least 5 points in the contour
@@ -309,12 +340,19 @@ def find_offsets(img_1, img_2, img_3=None):
     
     vals = (np.max(abs(img_1)), np.max(abs(img_2)), np.max(abs(img_3)))
 
-    bounds = (np.multiply(-1, vals), vals)
+    bounds = (np.multiply(-2, vals), np.multiply(2, vals))
 
-    res = least_squares(ptp_magnitudes, x0, bounds=bounds, args=(img_1, img_2, img_3))
+    res = least_squares(ptp_magnitudes, x0, jac_magnitudes, bounds=bounds, args=(img_1, img_2, img3))
     # res = least_squares(std_magnitudes, x0, method='trf', args=(img_1, img_2, img_3))
 
     return res.x, res.status, res.message
+
+
+def jac_magnitudes(variables, x, y, z):
+    X, Y, Z = x - variables[0], y - variables[1], z - variables[2]
+    denominator = np.sqrt(X**2 + Y**2 + Z**2)
+    
+    return np.ptp(X / denominator), np.ptp(Y / denominator), np.ptp(Z / denominator)
 
 
 def fit_image(image, mask=None):
@@ -730,7 +768,7 @@ def segment_image(image, segments=1, adaptive=False, sel=circle_array(1),
     return image_thresh, image_shift, masks
 
 
-def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, alpha=1, color='black'):
+def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, alpha=1, color='black', show_axes=True):
     """Plot all circular contours."""
 
     if reverse:
@@ -763,10 +801,14 @@ def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, a
                         horizontalalignment='center', verticalalignment='center')
                 index += 1
 
+        if not show_axes:
+            ax.set_xticks([])
+            ax.set_yticks([])
+
     return masked_circles, c_img_rgba, boxes
 
 
-def show_alphas(contours_g, circular_contours, phis, name, show_circles_separately=True, bins=20, ltem_data=None):
+def show_alphas(contours_g, circular_contours, phis, name, show_circles_separately=True, bins=20, ltem_data=None, show_title=True):
     all_alphas = np.asarray([get_phi_diff(np.squeeze(c), phis)
                             for c in contours_g])
 
@@ -804,27 +846,35 @@ def show_alphas(contours_g, circular_contours, phis, name, show_circles_separate
         tops_circle = sorted(np.unique(np.around(hist_circle[0], 4)), reverse=True)[:2]
         lbin_circle = [np.where(np.around(hist_circle[0], 4) == t)
                     for t in tops_circle]
+    else:
+        tops_circle = sorted(
+            np.unique(np.around(hist_all[0], 0)), reverse=True)[:2]
+        lbin_circle = [np.where(np.around(hist_all[0], 0) == t)
+                       for t in tops_circle]
 
     # Now find the modes
     mode_all = (hist_all[1][lbin_all + 1] + hist_all[1][lbin_all]) / 2
     mode_ltem = (hist_ltem[1][lbin_ltem + 1] + hist_ltem[1][lbin_ltem]) / 2
 
+    plt.axvline(mode_all, linestyle='dashed', linewidth=1, color=colors['all'])
+    plt.axvline(mode_ltem, linestyle='dashed',
+                linewidth=1, color=colors['ltem'])
+
+    use_hist = hist_all if not show_circles_separately else hist_circle
     if show_circles_separately:
         mode_circle = (hist_circle[1][lbin_circle[0][0][-1] + 1] +
                     hist_circle[1][lbin_circle[0][0][0]]) / 2
         mode_circle_2 = (hist_circle[1][lbin_circle[1][0]
                         [-1] + 1] + hist_circle[1][lbin_circle[1][0][-1]]) / 2
+    # mode_circle = (use_hist[1][lbin_circle[0][0][-1] + 1] +
+    #                use_hist[1][lbin_circle[0][0][0]]) / 2
+    # mode_circle_2 = (use_hist[1][lbin_circle[1][0][-1] + 1] +
+    #                  use_hist[1][lbin_circle[1][0][-1]]) / 2
 
-    plt.axvline(mode_all, linestyle='dashed', linewidth=1, color=colors['all'])
-
-    if show_circles_separately:
         plt.axvline(mode_circle, linestyle='dashed',
                     linewidth=1, color=colors['circles'])
         plt.axvline(mode_circle_2, linestyle='dashed',
                     linewidth=1, color=colors['circles'])
-
-    plt.axvline(mode_ltem, linestyle='dashed',
-                linewidth=1, color=colors['ltem'])
 
     # Place text labels for the modes
     _, y_lim = plt.ylim()
@@ -848,35 +898,44 @@ def show_alphas(contours_g, circular_contours, phis, name, show_circles_separate
     plt.xticks(np.arange(0, 2.25 * np.pi, step=np.pi / 4), tick_labels)
     plt.yticks([])
 
-    plt.xlabel('Radians')
-    plt.title(rf'Average $\alpha$ for {name}')
+    plt.xlabel(r'$\alpha$ [Radians]')
+    if show_title:
+        plt.title(rf'Average $\alpha$ for {name}')
 
     plt.legend()
+
+    return plt, all_alphas, circle_alphas
 
 
 def show_circles(magnitudes, phis, thetas, contours, scale,
                  show_numbers=True, reverse=False, alpha=0.5, show='thetas',
                  normalize=True, show_both=False, phis_m=None,
-                 candidate_cutoff=np.pi / 6):
+                 candidate_cutoff=np.pi / 6, show_title=True, show_axes=True,
+                 just_candidates=True):
     """Plot all circular contours."""
     masked_circles, _, boxes = show_all_circles(thetas, contours, reverse=reverse)
     count = len(boxes)
+    print(f'Found {count} boxes.')
 
     num_columns = 3 if not show_both else 4
     column_width = 8 if not show_both else 6
     total_count = count if not show_both else 2 * count
-    num_rows = np.ceil(total_count / num_columns).astype(int)
+    # num_rows = np.ceil(total_count / num_columns).astype(int)
+    num_rows = 1
     yd, xd = magnitudes.shape
 
     extent_factor = 0.3
     index = 1
-
+    plot_index = 1
+    sm = cm.ScalarMappable(cmap=cm.coolwarm)
+    
     # Track candidates. Cutoff of pi/6 allows for 3 sigma.
     candidates = {}
     all_contours = {}
 
-    plt.figure(figsize=(num_columns * column_width, num_rows * column_width));
-
+    # fig = plt.figure(figsize=(num_columns * column_width, num_rows * column_width));
+    fig = plt.figure();
+    
     for box in boxes:
         # Walk along the path of the contour and measure deviations from it
         path = np.squeeze(contours[index - 1])
@@ -886,98 +945,124 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
 
         all_contours[index] = [dev_avg, dev_std, alpha_avg, alpha_std]
         if candidate:
-            candidates[index] = [dev_avg, dev_std, alpha_avg, alpha_std]
+            candidates[index] = all_contours[index]
 
-        xmin, ymin, width, height = box
-        extent_x, extent_y = int(extent_factor * width), int(extent_factor * height)
-        extent = np.min([extent_x, extent_y])
-        xmin, ymin = np.max([xmin - extent, 0]), np.max([ymin - extent, 0])
-        xmax = np.min([xmin + width + 2 * extent, xd])
-        ymax = np.min([ymin + height + 2 * extent, yd])
-        box_xd, box_yd = xmax - xmin, ymax - ymin
+        if candidate or not just_candidates:
+            xmin, ymin, width, height = box
+            extent_x, extent_y = int(extent_factor * width), int(extent_factor * height)
+            extent = np.min([extent_x, extent_y])
+            xmin, ymin = np.max([xmin - extent, 0]), np.max([ymin - extent, 0])
+            xmax = np.min([xmin + width + 2 * extent, xd])
+            ymax = np.min([ymin + height + 2 * extent, yd])
+            box_xd, box_yd = xmax - xmin, ymax - ymin
 
-        m_subset = magnitudes[ymin:ymax, xmin:xmax]
-        p_subset = phis[ymin:ymax, xmin:xmax]
-        t_subset = thetas[ymin:ymax, xmin:xmax]
-        
-        im_to_show = p_subset if show_both == 'phis' else t_subset
-        cmap_to_show = ciecam02_cmap() if show == 'phis' else cm.coolwarm_r
-        
-        # Create a pair of (x, y) coordinates
-        x = np.linspace(1, box_xd - 2, box_xd, dtype=np.uint8)
-        y = np.linspace(1, box_yd - 2, box_yd, dtype=np.uint8)
-        X, Y = np.meshgrid(x, y)
-
-        # Create vector lengths
-        U = np.ones_like(m_subset) if normalize else m_subset * \
-            np.cos(p_subset) * np.sin(t_subset)
-        V = np.ones_like(m_subset) if normalize else m_subset * \
-            np.sin(p_subset) * np.sin(t_subset)
-
-        index_to_show = index if not show_both else 2 * index - 1
-        ax = plt.subplot(num_rows, num_columns, index_to_show)
-        ax.autoscale()
-        ax.imshow(im_to_show, cmap=cmap_to_show)
-        ax.imshow(masked_circles[ymin:ymax, xmin:xmax], interpolation='none', alpha=alpha)
-        ax.add_artist(ScaleBar(scale, box_alpha=0.8))
-        
-        title = f'({xmin}, {ymin}) to ({xmax}, {ymax}), ' \
-                f'{int(width * scale * scale_multiplier)}x{int(height * scale * scale_multiplier)} nm\n' \
-               rf'$\alpha:\ {alpha_avg:.3f},\ \sigma_{{\alpha}}:\ {alpha_std:.2f}\quad $' \
-               rf'$\phi_{{dev}}:\ {dev_avg:.3f},\ \sigma_{{dev}}:\ {dev_std:.2f}$'
-
-        ax.set_title(title)
-
-        colors = itertools.cycle(['red', 'yellow', 'green', 'blue'])
-        num_pts = len(path)
-        pts = [path[0], path[int(num_pts / 4)], path[int(num_pts / 2)],
-               path[int(3 * num_pts / 4)]]
-        for point in pts:
-            ax.scatter(point[0] - xmin, point[1] - ymin, c=next(colors))
-
-        if show_numbers:
-            c = 'black' if not candidate else 'blue'
-            label = index if not candidate else fr'{index}$\circlearrowright$' \
-                if alpha_avg < np.pi else fr'{index}$\circlearrowleft$'
-
-            t = ax.text(0, 0, label, fontdict={'fontsize': 20}, c=c,
-                    horizontalalignment='left', verticalalignment='top');
-            t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=c))
-
-        ax.quiver(X, Y, U, V, units='dots', angles=p_subset * 180 / np.pi, pivot='mid')
-
-        span = 5
-        ax.set_xticks(x[::span])
-        ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
-        ax.set_yticks(y[::span])
-        ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
-        
-        if show_both:
-            p_m_subset = phis_m[ymin:ymax, xmin:xmax]
+            m_subset = magnitudes[ymin:ymax, xmin:xmax]
+            p_subset = phis[ymin:ymax, xmin:xmax]
+            t_subset = thetas[ymin:ymax, xmin:xmax]
             
-            ax = plt.subplot(num_rows, num_columns, 2 * index)
+            im_to_show = p_subset if show_both == 'phis' else t_subset
+            cmap_to_show = ciecam02_cmap() if show == 'phis' else cm.coolwarm_r
+            
+            # Create a pair of (x, y) coordinates
+            x = np.linspace(1, box_xd - 2, box_xd, dtype=np.uint8)
+            y = np.linspace(1, box_yd - 2, box_yd, dtype=np.uint8)
+            X, Y = np.meshgrid(x, y)
+
+            # Create vector lengths
+            U = np.ones_like(m_subset) if normalize else m_subset * \
+                np.cos(p_subset) * np.sin(t_subset)
+            V = np.ones_like(m_subset) if normalize else m_subset * \
+                np.sin(p_subset) * np.sin(t_subset)
+
+            # index_to_show = index if not show_both else 2 * index - 1
+            if plot_index % num_columns == 0:
+                num_rows += 1
+                n = len(fig.axes)
+                
+                for i in range(n):
+                    fig.axes[i].change_geometry(num_rows, num_columns, i + 1)
+     
+            ax = plt.subplot(num_rows, num_columns, plot_index)
             ax.autoscale()
-            ax.imshow(p_m_subset, cmap=ciecam02_cmap())
-            ax.imshow(masked_circles[ymin:ymax, xmin:xmax], interpolation='none',
-                      alpha=alpha, cmap=cm.binary)
+            ax.imshow(im_to_show, cmap=cmap_to_show)
+            ax.imshow(masked_circles[ymin:ymax, xmin:xmax], interpolation='none', alpha=alpha)
             ax.add_artist(ScaleBar(scale, box_alpha=0.8))
+            
+            title = f'({xmin}, {ymin}) to ({xmax}, {ymax}), ' \
+                    f'{int(width * scale * scale_multiplier)}x{int(height * scale * scale_multiplier)} nm\n' \
+                rf'$\alpha:\ {alpha_avg:.3f},\ \sigma_{{\alpha}}:\ {alpha_std:.2f}\quad $' \
+                rf'$\phi_{{dev}}:\ {dev_avg:.3f},\ \sigma_{{dev}}:\ {dev_std:.2f}$'
+
+            ax.set_title(title if show_title else '')
+
+            colors = itertools.cycle(['red', 'yellow', 'green', 'blue'])
+            num_pts = len(path)
+            pts = [path[0], path[int(num_pts / 4)], path[int(num_pts / 2)],
+                path[int(3 * num_pts / 4)]]
+            for point in pts:
+                ax.scatter(point[0] - xmin, point[1] - ymin, c=next(colors))
 
             if show_numbers:
-                t = ax.text(0, 0, index, fontdict={'fontsize': 20}, c='black',
-                        horizontalalignment='left', verticalalignment='top')
-                t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor='black'))
+                c = 'black' if not candidate else 'blue'
+                label = index if not candidate else fr'{index}$\circlearrowright$' \
+                    if alpha_avg < np.pi else fr'{index}$\circlearrowleft$'
 
-            ax.quiver(X, Y, U, V, units='dots', angles=p_subset * 180 / np.pi, color='white')
+                t = ax.text(0, 0, label, fontdict={'fontsize': 20}, c=c,
+                        horizontalalignment='left', verticalalignment='top');
+                t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=c))
 
-            ax.set_title(title)
-            span = 5
-            ax.set_xticks(x[::span])
-            ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
-            ax.set_yticks(y[::span])
-            ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
+            ax.quiver(X, Y, U, V, units='dots', angles=p_subset * 180 / np.pi, pivot='mid')
+
+            if show_axes:
+                span = 5
+                ax.set_xticks(x[::span])
+                ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
+                ax.set_yticks(y[::span])
+                ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
+            else:
+                ax.set_xticks([])
+                ax.set_yticks([])
             
+            if show_both:
+                p_m_subset = phis_m[ymin:ymax, xmin:xmax]
+                
+                ax = plt.subplot(num_rows, num_columns, 2 * index)
+                ax.autoscale()
+                ax.imshow(p_m_subset, cmap=ciecam02_cmap())
+                ax.imshow(masked_circles[ymin:ymax, xmin:xmax], interpolation='none',
+                        alpha=alpha, cmap=cm.binary)
+                ax.add_artist(ScaleBar(scale, box_alpha=0.8))
+
+                if show_numbers:
+                    t = ax.text(0, 0, index, fontdict={'fontsize': 20}, c='black',
+                            horizontalalignment='left', verticalalignment='top')
+                    t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor='black'))
+
+                ax.quiver(X, Y, U, V, units='dots', angles=p_subset * 180 / np.pi, color='white')
+
+                ax.set_title(title)
+                span = 5
+                ax.set_xticks(x[::span])
+                ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
+                ax.set_yticks(y[::span])
+                ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
+                
+            # sm = cm.ScalarMappable(cmap=cm.coolwarm)
+            # cbar = fig.colorbar(sm, ax=ax, shrink=0.3);
+            # cbar.set_ticks([0, 0.5, 1]);
+            # cbar.ax.set_yticklabels(['Down', f'X-Y', 'Up']);
+            # divider = make_axes_locatable(ax)
+            # cax = divider.append_axes('right', size='5%', pad=0.05)
+            # cbar = plt.colorbar(sm, cax=cax)
+            # cbar.set_ticks([0, 0.5, 1])
+            # cbar.ax.set_yticklabels(['Down', f'X-Y', 'Up'])
+
+            plot_index += 1 if not show_both else 2
+
         index += 1
 
+    fig.set_size_inches(num_columns * column_width, num_rows * column_width);
+    
     return candidates, all_contours
 
 
