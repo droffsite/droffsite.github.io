@@ -467,30 +467,24 @@ def get_phi_diff(path, phis):
     """Determine the average angle of magnetization relative to the
        contour it circles."""
 
-    # Determine the angle along the path from point to point
+    # Determine the angle along the path from point to point. Need to
+    # roll to connect end to beginning.
     path_diff = np.roll(path, -2) - path
 
     # Flip the sign of y for matplotlib (y=0 is at the top)
     path_angle = np.arctan2(-path_diff[:, 1], path_diff[:, 0])
+
+    # Adjust range to 0..2 pi
     path_angle %= (2 * np.pi)
-    # print(f'{np.min(path_angle)} to {np.max(path_angle)}')
 
     # Collect the phis along the path and subtract them from the path angles
     phis_path = np.array([phis[point[1], point[0]] for point in path])
-
-    # Adjust to keep the range -pi to pi
-    # phis_path = np.where(phis_path > np.pi, phis_path - 2 * np.pi, phis_path)
-
     phis_diff = phis_path - path_angle
-    # phis_diff = np.where(phis_diff < -np.pi, phis_diff + 2 * np.pi, phis_diff)
-    # phis_diff = np.where(phis_diff > np.pi, phis_diff - 2 * np.pi, phis_diff)
 
     # Calculate alpha per JC's definition: deviation from domain wall normal traveling
-    # from low M_z to high M_z. Alpha ranges from 0 to 2 pi.
-    # alphas = phis_diff# + np.pi / 2
-    # alphas = np.where(phis_diff < 0, phis_diff + 2 *
-    #                   np.pi, phis_diff) + np.pi / 2
-    # alphas = np.where(alphas > 2 * np.pi, alphas - 2 * np.pi, alphas)
+    # from low M_z to high M_z. Alpha ranges from 0 to 2 pi. The path goes clockwise
+    # around the contour. For now, assume the center of the contour is where high M_z
+    # is, thus clocwise travel should be pi/2 while anticlockwise should be 3/2 pi.
     alphas = (phis_diff % (2 * np.pi)) + np.pi / 2
 
     # print(f'\N{greek small letter phi}: {np.min(phis_diff):.2f} to {np.max(phis_diff):.2f}; '\
