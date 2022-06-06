@@ -604,7 +604,7 @@ def process_ltem_data(ltem_data_path):
     # Data format is array of complex numbers, real = x, imaginary = y
     ltem_data = np.load(ltem_data_path)
     ltem_data_xy = ltem_data if not zfile else (
-        ltem_data['Bx'] + 1j * ltem_data['By'])#[::-1, :]
+        ltem_data['Bx'] + 1j * ltem_data['By'])
     xerror = 0 if not zfile else ltem_data['x'][1] - ltem_data['x'][0]
     yerror = 0 if not zfile else ltem_data['y'][1] - ltem_data['y'][0]
 
@@ -811,7 +811,7 @@ def segment_image(image, segments=1, adaptive=False, sel=circle_array(1),
     return image_thresh, image_shift, masks
 
 
-def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, alpha=1, color='black', show_axes=True):
+def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, alpha=1, color='black', show_axes=True, origin='upper'):
     """Plot all circular contours."""
 
     if reverse:
@@ -835,7 +835,7 @@ def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, a
     if ax is not None:
         cmap_to_show = cm.binary_r if color == 'black' else cm.binary
         ax.imshow(masked_circles, interpolation='none',
-                  alpha=alpha, cmap=cmap_to_show, zorder=100)
+                  alpha=alpha, cmap=cmap_to_show, zorder=100, origin=origin)
 
         if show_numbers:
             index = 1
@@ -845,6 +845,14 @@ def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, a
                         alpha=alpha, color=color,
                         horizontalalignment='center', verticalalignment='center')
                 index += 1
+                # path = np.squeeze(contours[index - 1])
+                # xmin, ymin, width, height = box
+                # colors = itertools.cycle(['red', 'yellow', 'green', 'blue'])
+                # num_pts = len(path)
+                # pts = [path[0], path[int(num_pts / 4)], path[int(num_pts / 2)],
+                #     path[int(3 * num_pts / 4)]]
+                # for point in pts:
+                #     ax.scatter(point[0] - xmin, point[1] - ymin, c=next(colors))
 
         if not show_axes:
             ax.set_xticks([])
@@ -1036,10 +1044,10 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
                  show_numbers=True, reverse=False, alpha=0.5, show='thetas',
                  normalize=True, show_both=False, phis_m=None,
                  candidate_cutoff=np.pi / 6, show_title=True, show_axes=True,
-                 just_candidates=True):
+                 just_candidates=True, origin='upper'):
     """Plot all circular contours."""
     masked_circles, _, boxes = show_all_circles(
-        thetas, contours, reverse=reverse)
+        thetas, contours, reverse=reverse, origin=origin)
     count = len(boxes)
     print(f'Found {count} boxes.')
 
@@ -1058,6 +1066,7 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
     # Track candidates. Cutoff of pi/6 allows for 3 sigma.
     candidates = {}
     all_contours = {}
+    cw, ccw = 0, 0
 
     # fig = plt.figure(figsize=(num_columns * column_width, num_rows * column_width));
     fig = plt.figure()
@@ -1094,6 +1103,7 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
 
             im_to_show = p_subset if show_both == 'phis' else t_subset
             cmap_to_show = ciecam02_cmap() if show == 'phis' else cm.coolwarm_r
+            cmap_max = 2 * np.pi if show == 'phis' else np.pi
 
             # Create a pair of (x, y) coordinates
             x = np.linspace(1, box_xd - 2, box_xd, dtype=np.uint8)
@@ -1116,9 +1126,9 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
 
             ax = plt.subplot(num_rows, num_columns, plot_index)
             ax.autoscale()
-            ax.imshow(im_to_show, cmap=cmap_to_show)
+            ax.imshow(im_to_show, cmap=cmap_to_show, vmin=0, vmax=cmap_max, origin=origin)
             ax.imshow(masked_circles[ymin:ymax, xmin:xmax],
-                      interpolation='none', alpha=alpha)
+                      interpolation='none', alpha=alpha, origin=origin)
             ax.add_artist(ScaleBar(scale, box_alpha=0.8))
 
             title = f'({xmin}, {ymin}) to ({xmax}, {ymax}), ' \
@@ -1136,9 +1146,15 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
                 ax.scatter(point[0] - xmin, point[1] - ymin, c=next(colors))
 
             if show_numbers:
-                c = 'black' if not candidate else 'blue'
-                label = index if not candidate else fr'{index}$\circlearrowright$' \
-                    if alpha_avg < np.pi else fr'{index}$\circlearrowleft$'
+                c = 'red' if not candidate else 'blue'
+                # label = index if not candidate else fr'{index}$\circlearrowright$' \
+                #     if alpha_avg < np.pi else fr'{index}$\circlearrowleft$'
+                if alpha_avg < np.pi:
+                    label = fr'{index}$\circlearrowright$'
+                    cw += 1
+                else:
+                    label = fr'{index}$\circlearrowleft$'
+                    ccw += 1
 
                 t = ax.text(0, 0, label, fontdict={'fontsize': 20}, c=c,
                             horizontalalignment='left', verticalalignment='top')
@@ -1198,6 +1214,8 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
         index += 1
 
     fig.set_size_inches(num_columns * column_width, num_rows * column_width)
+    
+    print(f'Found {cw} clockwise and {ccw} anticlockwise contours')
 
     return candidates, all_contours
 
@@ -1298,7 +1316,7 @@ def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True):
             np.sin(p_subset) * np.sin(t_subset)
 
         ax = plt.subplot(num_rows, num_cols, index + 1)
-        ax.imshow(thetas[ymin:ymax, xmin:xmax], cmap=cm.coolwarm_r, alpha=0.8)
+        ax.imshow(thetas[ymin:ymax, xmin:xmax], cmap=cm.coolwarm_r, alpha=0.8, vmin=0, vmax=np.pi)
         ax.imshow(masked_circles[ymin:ymax, xmin:xmax],
                   interpolation='none', alpha=0.5)
         ax.quiver(X, Y, U, V, units='dots',
