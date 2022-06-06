@@ -198,6 +198,19 @@ def ciecam02_cmap():
     return mpl.colors.ListedColormap(color_circle_rgb)
 
 
+def ciecam02_cmap_r():
+    """Create a perceptually uniform colormap based on CIECAM02."""
+    # Based on https://stackoverflow.com/questions/23712207/cyclic-colormap-without-visual-distortions-for-use-in-phase-angle-plots
+
+    # first draw a circle in the cylindrical JCh color space.
+    # First channel is lightness, second chroma, third hue in degrees.
+    color_circle = np.ones((256, 3)) * 60
+    color_circle[:, 1] = np.ones((256)) * 45
+    color_circle[:, 2] = np.arange(360, 0, 360 / 256)
+    color_circle_rgb = cspace_convert(color_circle, 'JCh', 'sRGB1')
+
+    return mpl.colors.ListedColormap(color_circle_rgb)
+
 def file_for(files, token):
     """Convenience method for extracting file locations"""
 
@@ -230,7 +243,7 @@ def find_circular_contours(img, diff_axes_threshold=0.3, comparator='gt', show=F
 
     # Find all contours
     contours, _ = cv2.findContours(ups, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-    print(np.asarray(contours).shape)
+    # print(np.asarray(contours).shape)
 
     # Remove the contours that are on the edges
     contours_g = [contour for contour in contours
@@ -238,12 +251,11 @@ def find_circular_contours(img, diff_axes_threshold=0.3, comparator='gt', show=F
                   and ydim - 1 not in contour[:, :, 1]
                   and len(np.squeeze(contour).shape) == 2]
 
-    for contour in contours_g:
+    for contour in [c for c in contours_g if len(c) > 4]:
         # Fit the contour to an ellipse. This requires there be at least 5 points in the contour
         # (thus the if). Throw out anything where the major and minor axes are different by more
         # than the threshold
-        width, height = cv2.fitEllipse(contour)[1] if len(
-            contour) > 4 else [diff_axes_threshold + 1, 0]
+        width, height = cv2.fitEllipse(contour)[1]
         diff = np.abs(width - height)
 
         if diff < np.max([width, height]) * diff_axes_threshold:
@@ -460,21 +472,26 @@ def get_phi_diff(path, phis):
 
     # Flip the sign of y for matplotlib (y=0 is at the top)
     path_angle = np.arctan2(-path_diff[:, 1], path_diff[:, 0])
+    path_angle %= (2 * np.pi)
+    # print(f'{np.min(path_angle)} to {np.max(path_angle)}')
 
     # Collect the phis along the path and subtract them from the path angles
     phis_path = np.array([phis[point[1], point[0]] for point in path])
 
     # Adjust to keep the range -pi to pi
-    phis_path = np.where(phis_path > np.pi, phis_path - 2 * np.pi, phis_path)
+    # phis_path = np.where(phis_path > np.pi, phis_path - 2 * np.pi, phis_path)
 
     phis_diff = phis_path - path_angle
-    phis_diff = np.where(phis_diff < -np.pi, phis_diff + 2 * np.pi, phis_diff)
-    phis_diff = np.where(phis_diff > np.pi, phis_diff - 2 * np.pi, phis_diff)
+    # phis_diff = np.where(phis_diff < -np.pi, phis_diff + 2 * np.pi, phis_diff)
+    # phis_diff = np.where(phis_diff > np.pi, phis_diff - 2 * np.pi, phis_diff)
 
     # Calculate alpha per JC's definition: deviation from domain wall normal traveling
     # from low M_z to high M_z. Alpha ranges from 0 to 2 pi.
-    alphas = phis_diff + np.pi / 2
-    # alphas = np.where(alphas < 0, alphas + 2 * np.pi, alphas)
+    # alphas = phis_diff# + np.pi / 2
+    # alphas = np.where(phis_diff < 0, phis_diff + 2 *
+    #                   np.pi, phis_diff) + np.pi / 2
+    # alphas = np.where(alphas > 2 * np.pi, alphas - 2 * np.pi, alphas)
+    alphas = (phis_diff % (2 * np.pi)) + np.pi / 2
 
     # print(f'\N{greek small letter phi}: {np.min(phis_diff):.2f} to {np.max(phis_diff):.2f}; '\
     #       f'\N{greek small letter alpha}: {np.min(alphas):.2f} to {np.max(alphas):.2f}')
@@ -589,21 +606,30 @@ def mean_shift_filter(image, sp=1, sr=1):
 def process_ltem_data(ltem_data_path):
     """Return data for .npy formatted LTEM data"""
 
+    zfile = ltem_data_path[-1] == 'z'
     # Data format is array of complex numbers, real = x, imaginary = y
-    ltem_data_xy = np.load(ltem_data_path)
-    ltem_data_z = np.real(
-        np.sqrt(np.ones_like(ltem_data_xy) - ltem_data_xy**2))
+    ltem_data = np.load(ltem_data_path)
+    ltem_data_xy = ltem_data if not zfile else (
+        ltem_data['Bx'] + 1j * ltem_data['By'])#[::-1, :]
+    xerror = 0 if not zfile else ltem_data['x'][1] - ltem_data['x'][0]
+    yerror = 0 if not zfile else ltem_data['y'][1] - ltem_data['y'][0]
 
-    ltem_phases, ltem_magnitudes = get_phases(
-        np.real(ltem_data_xy), np.imag(ltem_data_xy), ltem_data_z)
+    ltem_data_z = np.real(
+        np.sqrt(np.ones_like(ltem_data_xy) - ltem_data_xy ** 2))
+
+    ltem_phases, _  = get_phases(
+        np.real(ltem_data_xy), np.imag(ltem_data_xy))
+    
+    ltem_magnitudes = get_magnitudes(
+        np.real(ltem_data_xy), np.imag(ltem_data_xy))
 
     ltem_circular_contours, ltem_contours_g, _ = find_circular_contours(
-        ltem_magnitudes)
+        ltem_magnitudes > np.average(ltem_magnitudes))
 
     ltem_alphas = np.asarray([get_phi_diff(np.squeeze(c), ltem_phases)
                               for c in ltem_circular_contours])
 
-    return ltem_phases, ltem_magnitudes, ltem_circular_contours, ltem_contours_g, ltem_alphas
+    return ltem_phases, ltem_magnitudes, ltem_circular_contours, ltem_contours_g, ltem_alphas, xerror, yerror
 
 
 def ptp_magnitudes(variables, image_1, image_2, image_3=None):
@@ -730,6 +756,19 @@ def save_intensity_images(path, figsize=(3, 3), dpi=300):
         plt.close()
 
 
+def scale_contour(cnt, scale):
+    M = cv2.moments(cnt)
+    cx = int(M['m10']/M['m00'])
+    cy = int(M['m01']/M['m00'])
+
+    cnt_norm = cnt - [cx, cy]
+    cnt_scaled = cnt_norm * scale
+    cnt_scaled = cnt_scaled + [cx, cy]
+    cnt_scaled = cnt_scaled.astype(np.int32)
+
+    return cnt_scaled
+
+
 def segment_image(image, segments=1, adaptive=False, sel=circle_array(1),
                   erode_iter=1, close_iter=7):
     """Segment image into a defined number of objects. Create positive and negative masks for those objects."""
@@ -802,7 +841,7 @@ def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, a
     if ax is not None:
         cmap_to_show = cm.binary_r if color == 'black' else cm.binary
         ax.imshow(masked_circles, interpolation='none',
-                  alpha=alpha, cmap=cmap_to_show)
+                  alpha=alpha, cmap=cmap_to_show, zorder=100)
 
         if show_numbers:
             index = 1
@@ -923,59 +962,69 @@ def show_alphas(contours_g, circular_contours, phis, name, show_circles_separate
     return plt, all_alphas, circle_alphas
 
 
-def show_alphas_2(alphas_candidates, alphas_all, alphas_ltem, name=r'$\alpha$', show_title=True):
+def show_alphas_2(alphas_candidates, alphas_all, alphas_ltem, name=r'$\alpha$', show_all=True, show_title=True):
     plt.figure(figsize=((10, 5)))
 
-    c_hist_arr, c_hist_bins, _ = plt.hist(alphas_candidates,
+    c_hist_arr, c_hist_bins, _ = plt.hist(alphas_candidates, alpha=0.7,
                                           density=True, zorder=10, label='Circular')
-    a_hist_arr, a_hist_bins, _ = plt.hist(alphas_all,
-                                          density=True, zorder=2, alpha=0.2, label='All SEMPA')
+    if show_all:
+        a_hist_arr, a_hist_bins, _ = plt.hist(alphas_all, histtype='step',
+                                              density=True, zorder=2, alpha=0.6, label='All SEMPA')
     l_hist_arr, l_hist_bins, _ = plt.hist(alphas_ltem, density=True, zorder=1,
-                                          alpha=0.2, label='LTEM')
+                                          alpha=0.3, label='LTEM')
 
     c_bin_width = c_hist_bins[1] - c_hist_bins[0]
     c_peak_indices = np.array(find_peaks(np.concatenate(
-        ([0], c_hist_arr, [0])), distance=len(c_hist_arr) // 8)[0]) - 1
+        ([0], c_hist_arr, [0])), distance=len(c_hist_arr) // 2)[0]) - 1
     c_max_bin_centers = [c_hist_bins[x] +
                          c_bin_width / 2 for x in c_peak_indices]
 
-    a_bin_width = a_hist_bins[1] - a_hist_bins[0]
-    a_peak_indices = np.array(find_peaks(np.concatenate(
-        ([0], a_hist_arr, [0])), distance=len(a_hist_arr) // 2)[0]) - 1
-    a_max_bin_centers = [a_hist_bins[x] +
-                         a_bin_width / 2 for x in a_peak_indices]
+    if show_all:
+        a_bin_width = a_hist_bins[1] - a_hist_bins[0]
+        a_peak_indices = np.array(find_peaks(np.concatenate(
+            ([0], a_hist_arr, [0])), distance=len(a_hist_arr) // 2)[0]) - 1
+        a_max_bin_centers = [a_hist_bins[x] +
+                             a_bin_width / 2 for x in a_peak_indices]
 
     l_bin_width = l_hist_bins[1] - l_hist_bins[0]
     l_peak_indices = np.array(find_peaks(np.concatenate(
-        ([0], l_hist_arr, [0])), distance=len(c_hist_arr) // 8)[0]) - 1
+        ([0], l_hist_arr, [0])), distance=len(l_hist_arr) // 2)[0]) - 1
     l_max_bin_centers = [l_hist_bins[x] +
                          l_bin_width / 2 for x in l_peak_indices]
 
     _, y_lim = plt.ylim()
-    shift_x_pos = 0.15
-    shift_x_neg = 0.6
+    shift_x_pos = 0
+    shift_x_neg = 0.35
     colors = {'circles': 'blue', 'all': 'orange', 'ltem': 'green'}
+    c_y_adjust, a_y_adjust, l_y_adjust = 0.87, 0.7, 0.53
+    box_alpha = 0.7
+    zline, zbox = 20, 30
     new_line = '\n'
 
     for c in c_max_bin_centers:
-        plt.axvline(c, color=colors['circles'], linestyle='dotted', zorder=20)
-        t = plt.text(c + shift_x_pos, y_lim * 0.85,
-                     rf'{c:.2f}{new_line}$\pm${c_bin_width / 2:.2f}')
-        t.set_bbox(dict(facecolor='white', alpha=0.6,
+        plt.axvline(c, color=colors['circles'],
+                    linestyle='dotted', zorder=zline)
+        t = plt.text(c + shift_x_pos, y_lim * c_y_adjust,
+                     rf'{c:.2f}{new_line}$\pm${c_bin_width / 2:.2f}', zorder=zbox)
+        t.set_bbox(dict(facecolor='white', alpha=box_alpha, zorder=20,
                    edgecolor=colors['circles']))
 
-    for a in a_max_bin_centers:
-        plt.axvline(a, color=colors['all'], linestyle='dotted', zorder=20)
-        t = plt.text(a - shift_x_neg, y_lim * 0.65,
-                     f'{a:.2f}{new_line}$\pm${a_bin_width / 2:.2f}')
-        t.set_bbox(dict(facecolor='white', alpha=0.6, edgecolor=colors['all']))
+    if show_all:
+        for a in a_max_bin_centers:
+            plt.axvline(a, color=colors['all'],
+                        linestyle='dotted', zorder=zline)
+            t = plt.text(a - shift_x_neg, y_lim * a_y_adjust,
+                         f'{a:.2f}{new_line}$\pm${a_bin_width / 2:.2f}', zorder=zbox)
+            t.set_bbox(dict(facecolor='white', alpha=box_alpha,
+                       zorder=20, edgecolor=colors['all']))
 
     for l in l_max_bin_centers:
-        plt.axvline(l, color=colors['ltem'], linestyle='dotted', zorder=20)
-        t = plt.text(l - shift_x_neg, y_lim * 0.85,
-                     f'{l:.2f}{new_line}$\pm${l_bin_width / 2:.2f}')
-        t.set_bbox(dict(facecolor='white', alpha=0.6,
-                   edgecolor=colors['ltem']))
+        plt.axvline(
+            l, color=colors['ltem'] if show_all else colors['all'], linestyle='dotted', zorder=zline)
+        t = plt.text(l - shift_x_neg, y_lim * (l_y_adjust if show_all else a_y_adjust),
+                     f'{l:.2f}{new_line}$\pm${l_bin_width / 2:.2f}', zorder=zbox)
+        t.set_bbox(dict(facecolor='white', alpha=box_alpha, zorder=20,
+                   edgecolor=colors['ltem'] if show_all else colors['all']))
 
     plt.xlabel(r'$\alpha$ [Radians]')
     plt.xlim((0, 2 * np.pi))
@@ -1028,7 +1077,8 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
         path = np.squeeze(contours[index - 1])
 
         dev_avg, dev_std, alpha_avg, alpha_std = get_phi_diff(path, phis)
-        candidate = dev_std <= candidate_cutoff
+        # print(dev_avg, dev_std, alpha_avg, alpha_std)
+        candidate = alpha_std <= candidate_cutoff
 
         all_contours[index] = [dev_avg, dev_std,
                                alpha_avg, alpha_std, width_nm, height_nm]
@@ -1160,7 +1210,7 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
 
 def show_contour_sizes(widths, heights, xerror, yerror):
     line = np.min((widths, heights)), np.max((widths, heights))
-    
+
     fig = plt.figure(figsize=(6, 6))
     ax = fig.add_subplot(111)
     ax.errorbar(widths, heights, xerror, yerror, fmt='.', ms=6)
@@ -1168,6 +1218,48 @@ def show_contour_sizes(widths, heights, xerror, yerror):
     ax.set_aspect('equal')
     ax.set_xlabel('width [nm]')
     ax.set_ylabel('height [nm]')
+
+
+def show_contours_overview(thetas_flattened, phis_flattened, contours_g, magnitudes_2d_flattened, axis_1, axis_2, axis_3):
+    fig = plt.figure(figsize=(20, 20))
+
+    ax1 = fig.add_subplot(221)
+    ax1.imshow(thetas_flattened, cmap=cm.coolwarm_r)
+
+    show_all_circles(thetas_flattened, contours_g, ax1, alpha=0.5)
+
+    sm = cm.ScalarMappable(cmap=cm.coolwarm)
+    cbar = fig.colorbar(sm, ax=ax1, shrink=0.3)
+    cbar.set_ticks([0, 0.5, 1])
+    cbar.ax.set_yticklabels(['Down', f'{axis_1}-{axis_2}', 'Up'])
+    #cbar.set_label('Magnetization in Z');
+    # ax1.imshow(masked_circles, interpolation='none')
+    ax1.set_title(rf'M$_{axis_3}$ magnetization')
+
+    ax2 = fig.add_subplot(222, polar=True)
+    show_phase_colors_circle(
+        ax2, add_dark_background=False, text_color='black')
+
+    ax3 = fig.add_subplot(223)
+    ax3.imshow(phis_flattened, cmap=ciecam02_cmap())
+    show_all_circles(thetas_flattened, contours_g,
+                     ax3, alpha=0.5, color='white')
+
+    ax3.set_title(rf'M$_{axis_1}$-M$_{axis_2}$ plane')
+
+    ax4 = fig.add_subplot(224)
+    phis_flattened_rgba = render_phases_and_magnitudes(
+        phis_flattened, magnitudes_2d_flattened)
+    ax4.imshow(phis_flattened_rgba, cmap=ciecam02_cmap())
+    show_all_circles(thetas_flattened, contours_g,
+                     ax4, alpha=0.5, color='white')
+
+    sm = cm.ScalarMappable(cmap=cm.binary_r)
+    cbar = fig.colorbar(sm, ax=ax4, shrink=0.3)
+    cbar.set_ticks([0, 1])
+    cbar.ax.set_yticklabels([f'All {axis_3}', f'All {axis_1}-{axis_2}'])
+
+    ax4.set_title(rf'M$_{axis_1}$-M$_{axis_2}$ plane with magnitude')
 
 
 def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True):
@@ -1236,27 +1328,38 @@ def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True):
         ax.set_title(title)
 
 
-def show_ltem_data(ltem_magnitudes, ltem_phases, ltem_box_widths, name):
-    cutoff = 50
+def show_ltem_data(ltem_magnitudes, ltem_phases, ltem_contours, ltem_box_widths, ltem_xerror, ltem_yerror, name, cutoff=False):
+    ydim, xdim = ltem_magnitudes.shape
+    cutoff = np.min((xdim, ydim)) // 32
+    phases_reduced = ltem_phases[cutoff:-cutoff, cutoff:-cutoff] if cutoff else ltem_phases
+    phases_reduced = ltem_phases[512:1024, 512:1024] if cutoff else ltem_phases
+    magnitudes_reduced = ltem_magnitudes[cutoff:-cutoff, cutoff:-cutoff] if cutoff else ltem_magnitudes
+    magnitudes_reduced = ltem_magnitudes[512:1024,
+                                         512:1024] if cutoff else ltem_magnitudes
+    magnitudes_norm = magnitudes_reduced / magnitudes_reduced.max()
 
     plt.figure(figsize=(16, 16))
     ax1 = plt.subplot(221)
-    ax1.imshow(ltem_phases[cutoff:-cutoff, cutoff:-cutoff],
-            cmap=ciecam02_cmap())
-    ax1.imshow(ltem_magnitudes[cutoff:-cutoff, cutoff:-cutoff], cmap=cm.binary_r, alpha=0.25)
+    ax1.imshow(np.zeros_like(phases_reduced), cmap='gray')
+    ax1.imshow(phases_reduced, alpha=magnitudes_norm, cmap=ciecam02_cmap(), origin='lower')
+    # ax1.imshow(magnitudes_reduced, cmap=cm.binary_r, alpha=0.5)
+    # show_all_circles(magnitudes_reduced, ltem_contours, ax1, color='white')
     #ax1.set_title(f'Phases for {ltem_data_name}');
     ax1.set_xticks([])
     ax1.set_yticks([])
     ax1.add_artist(ScaleBar(1.987e-9))
+    ax1.set_title('LTEM magnitudes CIECAM')
 
     ax2 = plt.subplot(223)
-    #ax2.imshow(ltem_circular_contours)
-    ax2.imshow(ltem_magnitudes[cutoff:-cutoff, cutoff:-cutoff])
-    #show_all_circles(ltem_magnitudes[cutoff:-cutoff, cutoff:-cutoff],
+    # ax2.imshow(ltem_circular_contours)
+    ax2.imshow(magnitudes_reduced, cmap='gray', origin='lower')
+    # show_all_circles(magnitudes_reduced, ltem_contours, ax2, reverse=True, color='white')
+    # show_all_circles(magnitudes_reduced,
     #                 ltem_circular_contours, ax2, alpha=0.5, show_numbers=False)
     #ax2.set_title(f'Magnitudes for {ltem_data_name}');
     ax2.set_xticks([])
     ax2.set_yticks([])
+    ax2.set_title('LTEM magnitudes')
 
     ax3 = plt.subplot(222, polar=True)
     show_phase_colors_circle(add_dark_background=False, ax=ax3)
@@ -1264,7 +1367,7 @@ def show_ltem_data(ltem_magnitudes, ltem_phases, ltem_box_widths, name):
     ax4 = plt.subplot(224)
     ax4.hist(ltem_box_widths, bins=25)
     ax4.set_xlabel('Pixels')
-    ax4.set_ylabel('Count')
+    ax4.set_yticks([])
     ax4.set_title(f'{name} contour widths')
 
 
@@ -1329,7 +1432,7 @@ def show_magnitude_distribution(magnitudes):
     spline = UnivariateSpline(np.linspace(0, 1, bins), n - max_count / 2, s=0)
     plt.axvspan(*spline.roots(), facecolor='gray', alpha=0.4, zorder=0)
     ax.set_title(f'Magnitudes normalized (max count at {avg:.2f})')
-    
+
 
 def show_phase_colors_circle_old(ax=None, add_dark_background=True,
                                  text_color='white'):
