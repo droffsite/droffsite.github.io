@@ -1328,14 +1328,17 @@ def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True):
         ax.set_title(title)
 
 
-def show_ltem_data(ltem_magnitudes, ltem_phases, ltem_contours, ltem_box_widths, ltem_xerror, ltem_yerror, name, cutoff=False):
+def show_ltem_data(ltem_magnitudes, ltem_phases, ltem_contours, ltem_box_widths, ltem_xerror, ltem_yerror, name, use_cutoff=False):
     ydim, xdim = ltem_magnitudes.shape
     cutoff = np.min((xdim, ydim)) // 32
-    phases_reduced = ltem_phases[cutoff:-cutoff, cutoff:-cutoff] if cutoff else ltem_phases
-    phases_reduced = ltem_phases[512:1024, 512:1024] if cutoff else ltem_phases
-    magnitudes_reduced = ltem_magnitudes[cutoff:-cutoff, cutoff:-cutoff] if cutoff else ltem_magnitudes
+    phases_reduced = ltem_phases[cutoff:-cutoff,
+                                 cutoff:-cutoff] if use_cutoff else ltem_phases
+    phases_reduced = ltem_phases[512:1024,
+                                 512:1024] if use_cutoff else ltem_phases
+    magnitudes_reduced = ltem_magnitudes[cutoff:-cutoff,
+                                         cutoff:-cutoff] if use_cutoff else ltem_magnitudes
     magnitudes_reduced = ltem_magnitudes[512:1024,
-                                         512:1024] if cutoff else ltem_magnitudes
+                                         512:1024] if use_cutoff else ltem_magnitudes
     magnitudes_norm = magnitudes_reduced / magnitudes_reduced.max()
 
     plt.figure(figsize=(16, 16))
@@ -1347,7 +1350,8 @@ def show_ltem_data(ltem_magnitudes, ltem_phases, ltem_contours, ltem_box_widths,
     #ax1.set_title(f'Phases for {ltem_data_name}');
     ax1.set_xticks([])
     ax1.set_yticks([])
-    ax1.add_artist(ScaleBar(1.987e-9))
+    # ax1.add_artist(ScaleBar(1.987e-9))
+    ax1.add_artist(ScaleBar(ltem_xerror))
     ax1.set_title('LTEM magnitudes CIECAM')
 
     ax2 = plt.subplot(223)
