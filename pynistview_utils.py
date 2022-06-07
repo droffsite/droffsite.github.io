@@ -11,8 +11,10 @@ import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib import cm
+from matplotlib.projections import get_projection_class
 from matplotlib_scalebar.scalebar import ScaleBar
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 from scipy.interpolate import UnivariateSpline
 from scipy.ndimage import gaussian_filter, median_filter
@@ -463,7 +465,7 @@ def get_phases(im_x, im_y, im_z=None):
     return (np.asarray(phis), thetas)
 
 
-def get_phi_diff(path, phis):
+def get_phi_diff(path, phis, flip_y=True):
     """Determine the average angle of magnetization relative to the
        contour it circles."""
 
@@ -472,25 +474,28 @@ def get_phi_diff(path, phis):
     path_diff = np.roll(path, -2) - path
 
     # Flip the sign of y for matplotlib (y=0 is at the top)
-    path_angle = np.arctan2(-path_diff[:, 1], path_diff[:, 0])
+    factor = -1 if flip_y else 1
+    path_angle = np.arctan2(factor * path_diff[:, 1], path_diff[:, 0])
 
     # Adjust range to 0..2 pi
     path_angle %= (2 * np.pi)
+    # print(f'Path angle: {path_angle}')
 
     # Collect the phis along the path and subtract them from the path angles
     phis_path = np.array([phis[point[1], point[0]] for point in path])
     phis_diff = phis_path - path_angle
+    # print(f'Phis path: {phis_path}')
+    # print(f'Phis diff: {phis_diff}')
 
     # Calculate alpha per JC's definition: deviation from domain wall normal traveling
     # from low M_z to high M_z. Alpha ranges from 0 to 2 pi. The path goes clockwise
     # around the contour. For now, assume the center of the contour is where high M_z
     # is, thus clocwise travel should be pi/2 while anticlockwise should be 3/2 pi.
-    alphas = (phis_diff % (2 * np.pi)) + np.pi / 2
-
+    alphas = (phis_diff + np.pi / 2) % (2 * np.pi)
     # print(f'\N{greek small letter phi}: {np.min(phis_diff):.2f} to {np.max(phis_diff):.2f}; '\
     #       f'\N{greek small letter alpha}: {np.min(alphas):.2f} to {np.max(alphas):.2f}')
 
-    return np.mean(phis_diff), np.std(phis_diff), np.mean(alphas), np.std(alphas)
+    return np.mean(phis_diff), np.std(phis_diff), np.mean(alphas), np.std(alphas), phis_diff, alphas
 
 
 def get_scale(file_path):
@@ -605,25 +610,39 @@ def process_ltem_data(ltem_data_path):
     ltem_data = np.load(ltem_data_path)
     ltem_data_xy = ltem_data if not zfile else (
         ltem_data['Bx'] + 1j * ltem_data['By'])
+    
+    # Determine pixel size
     xerror = 0 if not zfile else ltem_data['x'][1] - ltem_data['x'][0]
     yerror = 0 if not zfile else ltem_data['y'][1] - ltem_data['y'][0]
 
-    ltem_data_z = np.real(
-        np.sqrt(np.ones_like(ltem_data_xy) - ltem_data_xy ** 2))
-
+    # Get phases and magnitudes
     ltem_phases, _  = get_phases(
         np.real(ltem_data_xy), np.imag(ltem_data_xy))
     
     ltem_magnitudes = get_magnitudes(
         np.real(ltem_data_xy), np.imag(ltem_data_xy))
 
+    # ltem_circular_contours, ltem_contours_g, _ = find_circular_contours(
+    #     ltem_magnitudes > np.average(ltem_magnitudes))
+
+    # Find contours; throw out any that too short or too long; scale them up to move into
+    # the domain wall; get rid of contours that go off the edge of the image
+    ltem_height, ltem_width = ltem_magnitudes.shape
+    size = ltem_width
+
     ltem_circular_contours, ltem_contours_g, _ = find_circular_contours(
-        ltem_magnitudes > np.average(ltem_magnitudes))
+        ltem_magnitudes)
+    ltem_circular_contours = [c for c in ltem_circular_contours if len(
+        c) > 0.05 * size and len(c) < 0.4 * size]
+    ltem_circular_contours = [scale_contour(
+        c, 1.3) for c in ltem_circular_contours]
+    ltem_circular_contours = [c for c in ltem_circular_contours
+            if np.min(c) >= 0 and np.max(c) < size]
 
-    ltem_alphas = np.asarray([get_phi_diff(np.squeeze(c), ltem_phases)
-                              for c in ltem_circular_contours])
+    # ltem_alphas = np.asarray([get_phi_diff(np.squeeze(c), ltem_phases)
+    #                           for c in ltem_circular_contours])
 
-    return ltem_phases, ltem_magnitudes, ltem_circular_contours, ltem_contours_g, ltem_alphas, xerror, yerror
+    return ltem_phases, ltem_magnitudes, ltem_circular_contours, ltem_contours_g, xerror, yerror
 
 
 def ptp_magnitudes(variables, image_1, image_2, image_3=None):
@@ -968,7 +987,7 @@ def show_alphas_2(alphas_candidates, alphas_all, alphas_ltem, name=r'$\alpha$', 
     plt.figure(figsize=((10, 5)))
 
     c_hist_arr, c_hist_bins, _ = plt.hist(alphas_candidates, alpha=0.7,
-                                          density=True, zorder=10, label='Circular')
+                                          density=True, zorder=10, label='SEMPA')
     if show_all:
         a_hist_arr, a_hist_bins, _ = plt.hist(alphas_all, histtype='step',
                                               density=True, zorder=2, alpha=0.6, label='All SEMPA')
@@ -1044,16 +1063,19 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
                  show_numbers=True, reverse=False, alpha=0.5, show='thetas',
                  normalize=True, show_both=False, phis_m=None,
                  candidate_cutoff=np.pi / 6, show_title=True, show_axes=True,
-                 just_candidates=True, origin='upper'):
+                 just_candidates=True, origin='upper', show_limit=30):
     """Plot all circular contours."""
     masked_circles, _, boxes = show_all_circles(
         thetas, contours, reverse=reverse, origin=origin)
     count = len(boxes)
     print(f'Found {count} boxes.')
 
-    num_columns = 3 if not show_both else 4
-    column_width = 8 if not show_both else 6
-    total_count = count if not show_both else 2 * count
+    # num_columns = 3 if not show_both else 4
+    # column_width = 8 if not show_both else 6
+    num_columns = 4
+    column_width = 6
+    # total_count = count if not show_both else 2 * count
+    total_count = 2 * count
     # num_rows = np.ceil(total_count / num_columns).astype(int)
     num_rows = 1
     yd, xd = magnitudes.shape
@@ -1071,24 +1093,29 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
     # fig = plt.figure(figsize=(num_columns * column_width, num_rows * column_width));
     fig = plt.figure()
 
-    for box in boxes:
+    for box in boxes[:show_limit]:
         xmin, ymin, width, height = box
         width_nm = int(width * scale * scale_multiplier)
         height_nm = int(height * scale * scale_multiplier)
 
         # Walk along the path of the contour and measure deviations from it
         path = np.squeeze(contours[index - 1])
+        # if origin == 'lower':
+        #     path = path[::-1]
+            # phis = phis[::-1]
 
-        dev_avg, dev_std, alpha_avg, alpha_std = get_phi_diff(path, phis)
+        dev_avg, dev_std, alpha_avg, alpha_std, phi_diffs, alphas = get_phi_diff(path, phis, origin=='upper')
         # print(dev_avg, dev_std, alpha_avg, alpha_std)
-        candidate = alpha_std <= candidate_cutoff
+        fake_news = np.ptp(alphas) >= np.pi
+        candidate = alpha_std <= candidate_cutoff and not fake_news
 
         all_contours[index] = [dev_avg, dev_std,
                                alpha_avg, alpha_std, width_nm, height_nm]
         if candidate:
             candidates[index] = all_contours[index]
 
-        if candidate or not just_candidates:
+        if not fake_news and (candidate or not just_candidates):
+            # Select the area to view
             extent_x, extent_y = int(
                 extent_factor * width), int(extent_factor * height)
             extent = np.min([extent_x, extent_y])
@@ -1101,7 +1128,8 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
             p_subset = phis[ymin:ymax, xmin:xmax]
             t_subset = thetas[ymin:ymax, xmin:xmax]
 
-            im_to_show = p_subset if show_both == 'phis' else t_subset
+            # Set the image and pick a color map
+            im_to_show = p_subset if show == 'phis' else t_subset
             cmap_to_show = ciecam02_cmap() if show == 'phis' else cm.coolwarm_r
             cmap_max = 2 * np.pi if show == 'phis' else np.pi
 
@@ -1117,15 +1145,18 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
                 np.sin(p_subset) * np.sin(t_subset)
 
             # index_to_show = index if not show_both else 2 * index - 1
-            if plot_index % num_columns == 0:
+            if plot_index % (num_columns * num_rows + 1) == 0:
                 num_rows += 1
                 n = len(fig.axes)
 
                 for i in range(n):
                     fig.axes[i].change_geometry(num_rows, num_columns, i + 1)
 
+            # Create the axes
             ax = plt.subplot(num_rows, num_columns, plot_index)
             ax.autoscale()
+            
+            # Show the feature and path
             ax.imshow(im_to_show, cmap=cmap_to_show, vmin=0, vmax=cmap_max, origin=origin)
             ax.imshow(masked_circles[ymin:ymax, xmin:xmax],
                       interpolation='none', alpha=alpha, origin=origin)
@@ -1138,6 +1169,7 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
 
             ax.set_title(title if show_title else '')
 
+            # Place 4 dots to show the direction around the path
             colors = itertools.cycle(['red', 'yellow', 'green', 'blue'])
             num_pts = len(path)
             pts = [path[0], path[int(num_pts / 4)], path[int(num_pts / 2)],
@@ -1160,19 +1192,39 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
                             horizontalalignment='left', verticalalignment='top')
                 t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=c))
 
+            # Show the vectors
             ax.quiver(X, Y, U, V, units='dots',
                       angles=p_subset * 180 / np.pi, pivot='mid')
 
+            # Turn axis labels on or off
             if show_axes:
-                span = 5
-                ax.set_xticks(x[::span])
-                ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
-                ax.set_yticks(y[::span])
-                ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
+                x_span, y_span = width // 5, height // 5
+                ax.set_xticks(x[::x_span])
+                ax.set_xticklabels((x + xmin - 1).astype(int)[::x_span])
+                ax.set_yticks(y[::y_span])
+                ax.set_yticklabels((y + ymin - 1).astype(int)[::y_span])
             else:
                 ax.set_xticks([])
                 ax.set_yticks([])
+                
+            # Show alphas
+            xs = np.linspace(1, len(alphas) + 1, len(alphas))
+            p = np.polyfit(xs, alphas, 3)
+            alphas_fit = np.poly1d(p)
+            ax = plt.subplot(num_rows, num_columns, plot_index + 1)
+            ax.autoscale()
+            ax.plot(xs, alphas, '.', label=r'$\alpha$')
+            ax.plot(xs, alphas_fit(xs), '-', label='Fit')
+            ax.set_ylim((0, 2 * np.pi))
+            ax.set_xticks([])
+            ax.set_yticks([0, np.pi / 2, np.pi, 3/2 * np.pi, 2 * np.pi])
+            ax.set_yticklabels(['0', r'$\dfrac{\pi}{2}$', 
+                           r'$\pi$', r'$\dfrac{3\pi}{2}$', r'$2\pi$'])
 
+            ax.set_title(rf'$\alpha$: {alphas.min():.3f} to {alphas.max():.3f}')
+            plt.legend()
+            plot_index += 1
+            
             if show_both:
                 p_m_subset = phis_m[ymin:ymax, xmin:xmax]
 
@@ -1214,22 +1266,33 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
         index += 1
 
     fig.set_size_inches(num_columns * column_width, num_rows * column_width)
-    
-    print(f'Found {cw} clockwise and {ccw} anticlockwise contours')
+
+    number_of_plots = np.min((show_limit, count))
+    spurious = f' ({number_of_plots - cw - ccw} spurious contours)' if number_of_plots - \
+        cw - ccw > 0 else ''
+    print(f'Found {cw} clockwise and {ccw} anticlockwise contours{spurious}')
 
     return candidates, all_contours
 
 
-def show_contour_sizes(widths, heights, xerror, yerror):
-    line = np.min((widths, heights)), np.max((widths, heights))
-
+def show_contour_sizes(widths, heights, xerror, yerror, ltem_widths=None, ltem_heights=None, ltem_xerror=None, ltem_yerror=None):
     fig = plt.figure(figsize=(6, 6))
     ax = fig.add_subplot(111)
-    ax.errorbar(widths, heights, xerror, yerror, fmt='.', ms=6)
+
+    ax.errorbar(widths, heights, xerror, yerror, fmt='.', ms=6, label='SEMPA')
+    if ltem_widths is not None:
+        ax.errorbar(ltem_widths, ltem_heights,
+                    ltem_xerror, ltem_yerror, fmt='.', ms=6, label='LTEM')
+
+    line = np.min((ax.get_xlim(), ax.get_ylim())), np.max(
+        (ax.get_xlim(), ax.get_ylim()))
     ax.plot(line, line, linestyle='dashed', alpha=0.3)
+
     ax.set_aspect('equal')
     ax.set_xlabel('width [nm]')
     ax.set_ylabel('height [nm]')
+    if ltem_widths is not None:
+        plt.legend()
 
 
 def show_contours_overview(thetas_flattened, phis_flattened, contours_g, magnitudes_2d_flattened, axis_1, axis_2, axis_3):
@@ -1343,6 +1406,8 @@ def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True):
 def show_ltem_data(ltem_magnitudes, ltem_phases, ltem_contours, ltem_box_widths, ltem_xerror, ltem_yerror, name, use_cutoff=False):
     ydim, xdim = ltem_magnitudes.shape
     cutoff = np.min((xdim, ydim)) // 32
+    ltem_contours_reduced = [c for c in ltem_contours
+                             if np.min(c) >= 512 and np.max(c) < 1024] if use_cutoff else ltem_contours
     phases_reduced = ltem_phases[cutoff:-cutoff,
                                  cutoff:-cutoff] if use_cutoff else ltem_phases
     phases_reduced = ltem_phases[512:1024,
@@ -1353,34 +1418,36 @@ def show_ltem_data(ltem_magnitudes, ltem_phases, ltem_contours, ltem_box_widths,
                                          512:1024] if use_cutoff else ltem_magnitudes
     magnitudes_norm = magnitudes_reduced / magnitudes_reduced.max()
 
-    plt.figure(figsize=(16, 16))
-    ax1 = plt.subplot(221)
+    fig = plt.figure(figsize=(24, 8))
+    ax1 = plt.subplot(131)
     ax1.imshow(np.zeros_like(phases_reduced), cmap='gray')
     ax1.imshow(phases_reduced, alpha=magnitudes_norm, cmap=ciecam02_cmap(), origin='lower')
-    # ax1.imshow(magnitudes_reduced, cmap=cm.binary_r, alpha=0.5)
-    # show_all_circles(magnitudes_reduced, ltem_contours, ax1, color='white')
-    #ax1.set_title(f'Phases for {ltem_data_name}');
+    show_all_circles(np.zeros_like(magnitudes_reduced), ltem_contours_reduced,
+                     ax1, color='white', origin='lower', show_numbers=False)
+    ax1.set_title(f'Phases for {name}');
     ax1.set_xticks([])
     ax1.set_yticks([])
-    # ax1.add_artist(ScaleBar(1.987e-9))
     ax1.add_artist(ScaleBar(ltem_xerror))
-    ax1.set_title('LTEM magnitudes CIECAM')
+    ax12 = inset_axes(ax1, width='15%', height='15%', loc=4,
+                      axes_class=get_projection_class('polar'))
+    # ax12 = fig.add_axes([0.9, 0, 1, 0.1], polar=True)
+    show_phase_colors_circle(ax12, add_dark_background=True, show_angles=False)
 
-    ax2 = plt.subplot(223)
-    # ax2.imshow(ltem_circular_contours)
+    ax2 = plt.subplot(132)
     ax2.imshow(magnitudes_reduced, cmap='gray', origin='lower')
-    # show_all_circles(magnitudes_reduced, ltem_contours, ax2, reverse=True, color='white')
+    show_all_circles(np.zeros_like(magnitudes_reduced), ltem_contours_reduced,
+                     ax2, color='yellow', origin='lower', show_numbers=False)
     # show_all_circles(magnitudes_reduced,
     #                 ltem_circular_contours, ax2, alpha=0.5, show_numbers=False)
     #ax2.set_title(f'Magnitudes for {ltem_data_name}');
     ax2.set_xticks([])
     ax2.set_yticks([])
-    ax2.set_title('LTEM magnitudes')
+    ax2.set_title(f'Magnitudes for {name}')
 
-    ax3 = plt.subplot(222, polar=True)
-    show_phase_colors_circle(add_dark_background=False, ax=ax3)
+    # ax3 = plt.subplot(222, polar=True)
+    # show_phase_colors_circle(add_dark_background=False, ax=ax3)
 
-    ax4 = plt.subplot(224)
+    ax4 = plt.subplot(133)
     ax4.hist(ltem_box_widths, bins=25)
     ax4.set_xlabel('Pixels')
     ax4.set_yticks([])
@@ -1475,7 +1542,7 @@ def show_phase_colors_circle_old(ax=None, add_dark_background=True,
 
 
 def show_phase_colors_circle(ax=None, add_dark_background=True,
-                             text_color='white'):
+                             text_color='white', show_angles=True):
     """Plot a ring of colors for a legend."""
    # Generate a figure with a polar projection
     if ax is None:
@@ -1505,7 +1572,10 @@ def show_phase_colors_circle(ax=None, add_dark_background=True,
     im = ax.pcolormesh(t, r, tg.T, cmap=ciecam02_cmap(), shading='auto')
     ax.set_yticklabels([])            # turn off radial tick labels (yticks)
     # cosmetic changes to tick labels
-    ax.tick_params(axis='x', pad=15, labelsize=14, colors=text_color)
+    if show_angles:
+        ax.tick_params(axis='x', pad=15, labelsize=14, colors=text_color)
+    else:
+        ax.set_xticklabels([])
     # ax.spines['polar'].set_visible(False)    # turn off the axis spines.
 
 
