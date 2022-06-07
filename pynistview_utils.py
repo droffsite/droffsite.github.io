@@ -986,12 +986,12 @@ def show_alphas(contours_g, circular_contours, phis, name, show_circles_separate
 def show_alphas_2(alphas_candidates, alphas_all, alphas_ltem, name=r'$\alpha$', show_all=True, show_title=True):
     plt.figure(figsize=((10, 5)))
 
-    c_hist_arr, c_hist_bins, _ = plt.hist(alphas_candidates, alpha=0.7,
+    c_hist_arr, c_hist_bins, _ = plt.hist(alphas_candidates, alpha=0.7, bins=30,
                                           density=True, zorder=10, label='SEMPA')
     if show_all:
         a_hist_arr, a_hist_bins, _ = plt.hist(alphas_all, histtype='step',
                                               density=True, zorder=2, alpha=0.6, label='All SEMPA')
-    l_hist_arr, l_hist_bins, _ = plt.hist(alphas_ltem, density=True, zorder=1,
+    l_hist_arr, l_hist_bins, _ = plt.hist(alphas_ltem, density=True, zorder=1, bins=30,
                                           alpha=0.3, label='LTEM')
 
     c_bin_width = c_hist_bins[1] - c_hist_bins[0]
@@ -1430,7 +1430,6 @@ def show_ltem_data(ltem_magnitudes, ltem_phases, ltem_contours, ltem_box_widths,
     ax1.add_artist(ScaleBar(ltem_xerror))
     ax12 = inset_axes(ax1, width='15%', height='15%', loc=4,
                       axes_class=get_projection_class('polar'))
-    # ax12 = fig.add_axes([0.9, 0, 1, 0.1], polar=True)
     show_phase_colors_circle(ax12, add_dark_background=True, show_angles=False)
 
     ax2 = plt.subplot(132)
