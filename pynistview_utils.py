@@ -174,6 +174,20 @@ def calculate_distance(x1, x2):
     return np.sqrt((x1[0] - x2[0])**2 + (x1[1] - x2[1])**2)
 
 
+def calculate_winding_number(x, y, z):
+    """Calculate the winding number"""
+
+    # n = 1/4pi int(M dot (dM/dx cross dMdy) dxdy)
+    # Requires that M be normalized at all points
+    M = np.array(normalize_3d(x, y, z))
+
+    dmdx, dmdy = np.gradient(M, axis=(2, 1))
+    cross_dmdx_dmdy = np.cross(dmdx, dmdy, axis=0)
+    dot_m_dmdx_dmdy = np.einsum('i...,i...', M, cross_dmdx_dmdy)
+
+    return np.sum(dot_m_dmdx_dmdy) / (4 * np.pi)
+
+
 def clean_image(image, sigma=50, h=25):
     """Remove gradient and noise from image."""
     # Rescale to 0..255 for filters
@@ -212,6 +226,7 @@ def ciecam02_cmap_r():
     color_circle_rgb = cspace_convert(color_circle, 'JCh', 'sRGB1')
 
     return mpl.colors.ListedColormap(color_circle_rgb)
+
 
 def file_for(files, token):
     """Convenience method for extracting file locations"""
@@ -490,7 +505,7 @@ def get_phi_diff(path, phis, flip_y=True):
     # Calculate alpha per JC's definition: deviation from domain wall normal traveling
     # from low M_z to high M_z. Alpha ranges from 0 to 2 pi. The path goes clockwise
     # around the contour. For now, assume the center of the contour is where high M_z
-    # is, thus clocwise travel should be pi/2 while anticlockwise should be 3/2 pi.
+    # is, thus clockwise travel should be pi/2 while anticlockwise should be 3/2 pi.
     alphas = (phis_diff + np.pi / 2) % (2 * np.pi)
     # print(f'\N{greek small letter phi}: {np.min(phis_diff):.2f} to {np.max(phis_diff):.2f}; '\
     #       f'\N{greek small letter alpha}: {np.min(alphas):.2f} to {np.max(alphas):.2f}')
@@ -602,23 +617,36 @@ def mean_shift_filter(image, sp=1, sr=1):
     return rescale_to(img_shift, image)
 
 
+def normalize_3d(x, y, z):
+    """Perform element-wise normalization of 3 arrays"""
+
+    # First square the arrays, then perform element-wise sum
+    x2, y2, z2 = x ** 2, y ** 2, z ** 2
+    sum_xyz2 = np.sum((x2, y2, z2), axis=0)
+
+    # Return the square root of each array divided by the sum array
+    return np.sqrt(x2 / sum_xyz2) * np.sign(x), \
+        np.sqrt(y2 / sum_xyz2) * np.sign(y), \
+        np.sqrt(z2 / sum_xyz2) * np.sign(z) * -1
+
+
 def process_ltem_data(ltem_data_path):
-    """Return data for .npy formatted LTEM data"""
+    """Return data for .npy or .npz formatted LTEM data"""
 
     zfile = ltem_data_path[-1] == 'z'
     # Data format is array of complex numbers, real = x, imaginary = y
     ltem_data = np.load(ltem_data_path)
     ltem_data_xy = ltem_data if not zfile else (
         ltem_data['Bx'] + 1j * ltem_data['By'])
-    
+
     # Determine pixel size
     xerror = 0 if not zfile else ltem_data['x'][1] - ltem_data['x'][0]
     yerror = 0 if not zfile else ltem_data['y'][1] - ltem_data['y'][0]
 
     # Get phases and magnitudes
-    ltem_phases, _  = get_phases(
+    ltem_phases, _ = get_phases(
         np.real(ltem_data_xy), np.imag(ltem_data_xy))
-    
+
     ltem_magnitudes = get_magnitudes(
         np.real(ltem_data_xy), np.imag(ltem_data_xy))
 
@@ -637,7 +665,7 @@ def process_ltem_data(ltem_data_path):
     ltem_circular_contours = [scale_contour(
         c, 1.3) for c in ltem_circular_contours]
     ltem_circular_contours = [c for c in ltem_circular_contours
-            if np.min(c) >= 0 and np.max(c) < size]
+                              if np.min(c) >= 0 and np.max(c) < size]
 
     # ltem_alphas = np.asarray([get_phi_diff(np.squeeze(c), ltem_phases)
     #                           for c in ltem_circular_contours])
@@ -1059,7 +1087,7 @@ def show_alphas_2(alphas_candidates, alphas_all, alphas_ltem, name=r'$\alpha$', 
         plt.title = name
 
 
-def show_circles(magnitudes, phis, thetas, contours, scale,
+def show_circles(magnitudes, phis, thetas, contours, scale, m_1=None, m_2=None, m_3=None,
                  show_numbers=True, reverse=False, alpha=0.5, show='thetas',
                  normalize=True, show_both=False, phis_m=None,
                  candidate_cutoff=np.pi / 6, show_title=True, show_axes=True,
@@ -1100,12 +1128,9 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
 
         # Walk along the path of the contour and measure deviations from it
         path = np.squeeze(contours[index - 1])
-        # if origin == 'lower':
-        #     path = path[::-1]
-            # phis = phis[::-1]
 
-        dev_avg, dev_std, alpha_avg, alpha_std, phi_diffs, alphas = get_phi_diff(path, phis, origin=='upper')
-        # print(dev_avg, dev_std, alpha_avg, alpha_std)
+        dev_avg, dev_std, alpha_avg, alpha_std, phi_diffs, alphas = get_phi_diff(
+            path, phis, origin == 'upper')
         fake_news = np.ptp(alphas) >= np.pi
         candidate = alpha_std <= candidate_cutoff and not fake_news
 
@@ -1123,10 +1148,16 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
             xmax = np.min([xmin + width + 2 * extent, xd])
             ymax = np.min([ymin + height + 2 * extent, yd])
             box_xd, box_yd = xmax - xmin, ymax - ymin
+            y_s, x_s = slice(ymin, ymax), slice(xmin, xmax)
+            xy_s = (y_s, x_s)
 
-            m_subset = magnitudes[ymin:ymax, xmin:xmax]
-            p_subset = phis[ymin:ymax, xmin:xmax]
-            t_subset = thetas[ymin:ymax, xmin:xmax]
+            m_subset = magnitudes[xy_s]
+            p_subset = phis[xy_s]
+            t_subset = thetas[xy_s]
+
+            # Determine winding number
+            winding_number = calculate_winding_number(
+                m_1[xy_s], m_2[xy_s], m_3[xy_s]) if m_1 is not None else None
 
             # Set the image and pick a color map
             im_to_show = p_subset if show == 'phis' else t_subset
@@ -1155,17 +1186,20 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
             # Create the axes
             ax = plt.subplot(num_rows, num_columns, plot_index)
             ax.autoscale()
-            
+
             # Show the feature and path
-            ax.imshow(im_to_show, cmap=cmap_to_show, vmin=0, vmax=cmap_max, origin=origin)
-            ax.imshow(masked_circles[ymin:ymax, xmin:xmax],
+            ax.imshow(im_to_show, cmap=cmap_to_show,
+                      vmin=0, vmax=cmap_max, origin=origin)
+            ax.imshow(masked_circles[xy_s],
                       interpolation='none', alpha=alpha, origin=origin)
             ax.add_artist(ScaleBar(scale, box_alpha=0.8))
 
             title = f'({xmin}, {ymin}) to ({xmax}, {ymax}), ' \
                     f'{width_nm}x{height_nm} nm\n' \
-                rf'$\alpha:\ {alpha_avg:.3f},\ \sigma_{{\alpha}}:\ {alpha_std:.2f}\quad $' \
-                rf'$\phi_{{dev}}:\ {dev_avg:.3f},\ \sigma_{{dev}}:\ {dev_std:.2f}$'
+                rf'$\alpha:\ {alpha_avg:.2f},\ \sigma_{{\alpha}}:\ {alpha_std:.2f}\quad $' \
+                rf'$\phi_{{dev}}:\ {dev_avg:.2f},\ \sigma_{{dev}}:\ {dev_std:.2f}$'
+            if winding_number:
+                title += rf'$\quad n: {winding_number:.2f}$'
 
             ax.set_title(title if show_title else '')
 
@@ -1206,27 +1240,37 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
             else:
                 ax.set_xticks([])
                 ax.set_yticks([])
-                
+
             # Show alphas
             xs = np.linspace(1, len(alphas) + 1, len(alphas))
-            p = np.polyfit(xs, alphas, 3)
-            alphas_fit = np.poly1d(p)
+            # p = np.polyfit(xs, alphas, 3)
+            # alphas_fit = np.poly1d(p)
+            # window = 5
+            # cumsum = np.cumsum(np.insert(alphas, 0, 0))
+            # alphas_fit = (cumsum[window:] - cumsum[:-window]) / window
             ax = plt.subplot(num_rows, num_columns, plot_index + 1)
             ax.autoscale()
             ax.plot(xs, alphas, '.', label=r'$\alpha$')
-            ax.plot(xs, alphas_fit(xs), '-', label='Fit')
+            # ax.errorbar(xs, alphas, yerr=alpha_std,
+            # fmt='.', ms=6, label=r'$\alpha$')
+            ax.fill_between(xs, alphas + alpha_std,
+                            alphas - alpha_std, alpha=0.2)
+            # ax.plot(xs[2:-2], alphas_fit, '-', label='Moving average')
+            ax.axhline(alpha_avg, color='orange', ls='--', label='Average')
+            ax.axhline(np.pi, color='gray', alpha=0.4)
             ax.set_ylim((0, 2 * np.pi))
             ax.set_xticks([])
             ax.set_yticks([0, np.pi / 2, np.pi, 3/2 * np.pi, 2 * np.pi])
-            ax.set_yticklabels(['0', r'$\dfrac{\pi}{2}$', 
-                           r'$\pi$', r'$\dfrac{3\pi}{2}$', r'$2\pi$'])
+            ax.set_yticklabels(['0', r'$\dfrac{\pi}{2}$',
+                                r'$\pi$', r'$\dfrac{3\pi}{2}$', r'$2\pi$'])
 
-            ax.set_title(rf'$\alpha$: {alphas.min():.3f} to {alphas.max():.3f}')
+            ax.set_title(
+                rf'$\alpha$: {alphas.min():.3f} to {alphas.max():.3f}')
             plt.legend()
             plot_index += 1
-            
+
             if show_both:
-                p_m_subset = phis_m[ymin:ymax, xmin:xmax]
+                p_m_subset = phis_m[xy_s]
 
                 ax = plt.subplot(num_rows, num_columns, 2 * index)
                 ax.autoscale()
@@ -1250,16 +1294,6 @@ def show_circles(magnitudes, phis, thetas, contours, scale,
                 ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
                 ax.set_yticks(y[::span])
                 ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
-
-            # sm = cm.ScalarMappable(cmap=cm.coolwarm)
-            # cbar = fig.colorbar(sm, ax=ax, shrink=0.3);
-            # cbar.set_ticks([0, 0.5, 1]);
-            # cbar.ax.set_yticklabels(['Down', f'X-Y', 'Up']);
-            # divider = make_axes_locatable(ax)
-            # cax = divider.append_axes('right', size='5%', pad=0.05)
-            # cbar = plt.colorbar(sm, cax=cax)
-            # cbar.set_ticks([0, 0.5, 1])
-            # cbar.ax.set_yticklabels(['Down', f'X-Y', 'Up'])
 
             plot_index += 1 if not show_both else 2
 
@@ -1379,7 +1413,8 @@ def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True):
             np.sin(p_subset) * np.sin(t_subset)
 
         ax = plt.subplot(num_rows, num_cols, index + 1)
-        ax.imshow(thetas[ymin:ymax, xmin:xmax], cmap=cm.coolwarm_r, alpha=0.8, vmin=0, vmax=np.pi)
+        ax.imshow(thetas[ymin:ymax, xmin:xmax],
+                  cmap=cm.coolwarm_r, alpha=0.8, vmin=0, vmax=np.pi)
         ax.imshow(masked_circles[ymin:ymax, xmin:xmax],
                   interpolation='none', alpha=0.5)
         ax.quiver(X, Y, U, V, units='dots',
@@ -1421,10 +1456,11 @@ def show_ltem_data(ltem_magnitudes, ltem_phases, ltem_contours, ltem_box_widths,
     fig = plt.figure(figsize=(24, 8))
     ax1 = plt.subplot(131)
     ax1.imshow(np.zeros_like(phases_reduced), cmap='gray')
-    ax1.imshow(phases_reduced, alpha=magnitudes_norm, cmap=ciecam02_cmap(), origin='lower')
+    ax1.imshow(phases_reduced, alpha=magnitudes_norm,
+               cmap=ciecam02_cmap(), origin='lower')
     show_all_circles(np.zeros_like(magnitudes_reduced), ltem_contours_reduced,
                      ax1, color='white', origin='lower', show_numbers=False)
-    ax1.set_title(f'Phases for {name}');
+    ax1.set_title(f'Phases for {name}')
     ax1.set_xticks([])
     ax1.set_yticks([])
     ax1.add_artist(ScaleBar(ltem_xerror))
