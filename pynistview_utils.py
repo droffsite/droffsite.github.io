@@ -30,11 +30,18 @@ import cv2
 from selelems import circle_array, diamond_array
 
 sempa_file_suffix = 'sempa'
-scale_multiplier = 10e8
+scale_multiplier = 1e9
 
 
 def add_colorbar(img, ax, label='', cmap='gray'):
-    # Add a colorbar
+    """Add a colorbar
+
+    Args:
+        img (array): Image on which to add colorbar
+        ax (Axes): Axes for image
+        label (str, optional): Label. Defaults to ''.
+        cmap (str, optional): Colormap. Defaults to 'gray'.
+    """
     sm = cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(img.min(),
                                                          img.max()))
     divider = make_axes_locatable(ax)
@@ -42,10 +49,68 @@ def add_colorbar(img, ax, label='', cmap='gray'):
     sm.set_array([])
     cbar = plt.colorbar(sm, cax=cax, orientation='vertical')
     cbar.set_label(label)
+    
+    
+def adjust_magnetization_ranges(m_1_r_g, m_2_r_g, m_3_r_g, axis_1, axis_2, axis_3):
+    """Center the magnetization ranges and fit as needed
+
+    Args:
+        m_1_r_g (list): m_1 image data
+        m_2_r_g (list): m_2 image data
+        m_3_r_g (list): m_3 image data
+    """
+    # Find averages for each image and shift the values
+    m_1_average = (np.max(m_1_r_g) - np.abs(np.min(m_1_r_g))) / 2
+    m_2_average = (np.max(m_2_r_g) - np.abs(np.min(m_2_r_g))) / 2
+    m_3_average = (np.max(m_3_r_g) - np.abs(np.min(m_3_r_g))) / 2
+
+    m_1_shifted, m_2_shifted, m_3_shifted = m_1_r_g - m_1_average, \
+        m_2_r_g - m_2_average, m_3_r_g - m_3_average
+
+    # Optimize the amount of shift necessary by minimizing least squares fitting
+    (m_1_offset, m_2_offset, m_3_offset), status, message = \
+        find_offsets(m_1_shifted, m_2_shifted, m_3_shifted)
+
+    m_1_offset_opt, m_2_offset_opt, m_3_offset_opt = \
+        m_1_average + m_1_offset, m_2_average + m_2_offset, m_3_average + m_3_offset
+
+    m_1_adjusted, m_2_adjusted, m_3_adjusted = \
+        m_1_r_g - m_1_offset_opt, m_2_r_g - m_2_offset_opt, m_3_r_g - m_3_offset_opt
+
+    m_1_adjusted = m_1_adjusted - fit_image(m_1_adjusted)[0]
+    m_2_adjusted = m_2_adjusted - fit_image(m_2_adjusted)[0]
+    m_3_adjusted = m_3_adjusted - fit_image(m_3_adjusted)[0]
+    
+    print('M{} average: {:.4f}, M{} average: {:.4f}, M{} average: {:.4f}'.format(
+        axis_1, m_1_average, axis_2, m_2_average, axis_3, m_3_average))
+    print('M{} offset: {:.4f}, M{} offset: {:.4f}, M{} offset: {:.4f}'.format(
+        axis_1, m_1_offset, axis_2, m_2_offset, axis_3, m_3_offset))
+
+    print('M{} original range: {:.4f} to {:.4f}; offset range: {:.3f}, {:.4f} to {:.4f}'.format(
+        axis_1, m_1_r_g.min(), m_1_r_g.max(), np.ptp(m_1_adjusted), m_1_adjusted.min(), m_1_adjusted.max()))
+    print('M{} original range: {:.4f} to {:.4f}; offset range: {:.3f}, {:.4f} to {:.4f}'.format(
+        axis_2, m_2_r_g.min(), m_2_r_g.max(), np.ptp(m_2_adjusted), m_2_adjusted.min(), m_2_adjusted.max()))
+    print('M{} original range: {:.4f} to {:.4f}; offset range: {:.3f}, {:.4f} to {:.4f}'.format(
+        axis_3, m_3_r_g.min(), m_3_r_g.max(), np.ptp(m_3_adjusted), m_3_adjusted.min(), m_3_adjusted.max()))
+    
+    return m_1_adjusted, m_2_adjusted, m_3_adjusted
 
 
 def align_and_scale(intensity_1, intensity_2, m_1, m_2, m_3, m_4,
                     features=512, match_percent=0.15, filter=0.78):
+    """Use intensity_1 and intensity_2 (which ideally are identical) to align m_1 - 4
+
+    Args:
+        intensity_1 (array): XY intensity image
+        intensity_2 (array): XZ intensity image
+        m_1 (array): XY m_x
+        m_2 (array): XY m_y
+        m_3 (array): XZ m_z
+        m_4 (array): XZ m_x
+        features (int, optional): Max number of features. Defaults to 512.
+        match_percent (float, optional): Target percentage for "good" matches. Defaults to 0.15.
+        filter (float, optional): Not used. Defaults to 0.78.
+    """
     im_1 = rescale_to_8_bit(intensity_1)
     im_2 = rescale_to_8_bit(intensity_2)
     im_x = rescale_to_8_bit(m_1)
@@ -113,7 +178,13 @@ def align_and_scale(intensity_1, intensity_2, m_1, m_2, m_3, m_4,
     #     im_1, a_t, (width, height)), im_1)
     m_1_h = rescale_to(cv2.warpPerspective(im_x, h, (width, height)), m_1)
     m_2_h = rescale_to(cv2.warpPerspective(im_y, h, (width, height)), m_2)
-    plt.imshow(intensity_1_h, cmap='gray')
+    plt.figure(figsize=(12, 4))
+    ax1 = plt.subplot(131)
+    ax1.imshow(intensity_1, cmap='gray')
+    ax2 = plt.subplot(132)
+    ax2.imshow(intensity_2, cmap='gray')
+    ax3 = plt.subplot(133)
+    ax3.imshow(intensity_1_h, cmap='gray')
 
     # Figure out translation of homographies
 #     first_x_y = (h[0, 2]).astype(int)
@@ -510,7 +581,7 @@ def get_phi_diff(path, phis, flip_y=True):
     # print(f'\N{greek small letter phi}: {np.min(phis_diff):.2f} to {np.max(phis_diff):.2f}; '\
     #       f'\N{greek small letter alpha}: {np.min(alphas):.2f} to {np.max(alphas):.2f}')
 
-    return np.mean(phis_diff), np.std(phis_diff), np.mean(alphas), np.std(alphas), phis_diff, alphas
+    return np.mean(phis_diff), np.std(phis_diff, ddof=1), np.mean(alphas), np.std(alphas, ddof=1), phis_diff, alphas
 
 
 def get_scale(file_path):
@@ -625,9 +696,9 @@ def normalize_3d(x, y, z):
     sum_xyz2 = np.sum((x2, y2, z2), axis=0)
 
     # Return the square root of each array divided by the sum array
-    return np.sqrt(x2 / sum_xyz2) * np.sign(x), \
-        np.sqrt(y2 / sum_xyz2) * np.sign(y), \
-        np.sqrt(z2 / sum_xyz2) * np.sign(z) * -1
+    return np.sqrt(np.abs(x2 / sum_xyz2)) * np.sign(x), \
+        np.sqrt(np.abs(y2 / sum_xyz2)) * np.sign(y), \
+        np.sqrt(np.abs(z2 / sum_xyz2)) * np.sign(z) * -1
 
 
 def process_ltem_data(ltem_data_path):
@@ -640,8 +711,8 @@ def process_ltem_data(ltem_data_path):
         ltem_data['Bx'] + 1j * ltem_data['By'])
 
     # Determine pixel size
-    xerror = 0 if not zfile else ltem_data['x'][1] - ltem_data['x'][0]
-    yerror = 0 if not zfile else ltem_data['y'][1] - ltem_data['y'][0]
+    xerror = 0 if not zfile else (ltem_data['x'][1] - ltem_data['x'][0]) # * scale_multiplier
+    yerror = 0 if not zfile else (ltem_data['y'][1] - ltem_data['y'][0]) # * scale_multiplier
 
     # Get phases and magnitudes
     ltem_phases, _ = get_phases(
@@ -724,7 +795,8 @@ def render_phases_and_magnitudes(phases, magnitudes):
     # Apply phase intensity mask to the contrast: low intensity -> dark, high intensity -> light
     for i in range(3):
         im_adjusted[:, :, i] = np.multiply(
-            im_srgb[:, :, i], rescale_to(magnitudes, [0.3, 1]))
+            # im_srgb[:, :, i], rescale_to(magnitudes, [0.3, 1]))
+            im_srgb[:, :, i], rescale_to(magnitudes, [0, 1]))
 
     return im_adjusted
 
@@ -798,6 +870,16 @@ def save_intensity_images(path, figsize=(3, 3), dpi=300):
 
 
 def scale_contour(cnt, scale):
+    """Scale a contour.
+
+    Args:
+        cnt (list of points): Contour to be scaled
+        scale (float): Scale factor
+
+    Returns:
+        _type_: _description_
+    """
+    # Translate to the origin, scale points, translate back to the starting point
     M = cv2.moments(cnt)
     cx = int(M['m10']/M['m00'])
     cy = int(M['m01']/M['m00'])
@@ -872,6 +954,8 @@ def show_all_circles(img, contours, ax=None, show_numbers=True, reverse=False, a
     # Convert resultant image back to grayscale to produce a mask
     c_img_gray = cv2.cvtColor(c_img, cv2.COLOR_RGB2GRAY)
     masked_circles = np.ma.masked_where(c_img_gray == 0, c_img_gray)
+    # plt.imshow(~masked_circles.mask)
+    # print(~masked_circles.mask)
 
     # Use the mask to produce an RBGA image (transparent background)
     c_img_rgba = cv2.cvtColor(c_img, cv2.COLOR_RGB2RGBA)
@@ -1091,7 +1175,7 @@ def show_circles(magnitudes, phis, thetas, contours, scale, m_1=None, m_2=None, 
                  show_numbers=True, reverse=False, alpha=0.5, show='thetas',
                  normalize=True, show_both=False, phis_m=None,
                  candidate_cutoff=np.pi / 6, show_title=True, show_axes=True,
-                 just_candidates=True, origin='upper', show_limit=30):
+                 just_candidates=True, origin='upper', show_limit=30, show_anyway=False, skip_plot=False):
     """Plot all circular contours."""
     masked_circles, _, boxes = show_all_circles(
         thetas, contours, reverse=reverse, origin=origin)
@@ -1111,17 +1195,24 @@ def show_circles(magnitudes, phis, thetas, contours, scale, m_1=None, m_2=None, 
     extent_factor = 0.3
     index = 1
     plot_index = 1
-    sm = cm.ScalarMappable(cmap=cm.coolwarm)
+    # sm = cm.ScalarMappable(cmap=cm.coolwarm)
 
     # Track candidates. Cutoff of pi/6 allows for 3 sigma.
     candidates = {}
     all_contours = {}
+    c_index, displayed = 0, 0
     cw, ccw = 0, 0
+    new_line = '\n'
 
     # fig = plt.figure(figsize=(num_columns * column_width, num_rows * column_width));
-    fig = plt.figure()
+    if not skip_plot:
+        fig = plt.figure()
 
-    for box in boxes[:show_limit]:
+    while c_index < len(boxes) and displayed < show_limit:
+    # for box in boxes[:show_limit]:
+        box = boxes[c_index]
+        c_index += 1
+        
         xmin, ymin, width, height = box
         width_nm = int(width * scale * scale_multiplier)
         height_nm = int(height * scale * scale_multiplier)
@@ -1131,15 +1222,17 @@ def show_circles(magnitudes, phis, thetas, contours, scale, m_1=None, m_2=None, 
 
         dev_avg, dev_std, alpha_avg, alpha_std, phi_diffs, alphas = get_phi_diff(
             path, phis, origin == 'upper')
-        fake_news = np.ptp(alphas) >= np.pi
+        mae = np.abs(alphas - alpha_avg).mean()
+        sem = alpha_std / np.sqrt(len(alphas))
+        fake_news = np.ptp(alphas) >= np.pi if not show_anyway else False
         candidate = alpha_std <= candidate_cutoff and not fake_news
 
         all_contours[index] = [dev_avg, dev_std,
-                               alpha_avg, alpha_std, width_nm, height_nm]
-        if candidate:
-            candidates[index] = all_contours[index]
+                               alpha_avg, alpha_std, mae, sem, width_nm, height_nm]
 
         if not fake_news and (candidate or not just_candidates):
+            displayed += 1
+            
             # Select the area to view
             extent_x, extent_y = int(
                 extent_factor * width), int(extent_factor * height)
@@ -1156,156 +1249,172 @@ def show_circles(magnitudes, phis, thetas, contours, scale, m_1=None, m_2=None, 
             t_subset = thetas[xy_s]
 
             # Determine winding number
+            mask = ~masked_circles.mask[xy_s]
+            m_1_masked = np.ma.masked_where(mask, m_1[xy_s])
+            m_2_masked = np.ma.masked_where(mask, m_2[xy_s])
+            m_3_masked = np.ma.masked_where(mask, m_3[xy_s])
             winding_number = calculate_winding_number(
-                m_1[xy_s], m_2[xy_s], m_3[xy_s]) if m_1 is not None else None
+                m_1_masked, m_2_masked, m_3_masked) if m_1 is not None else None
+            # winding_number = calculate_winding_number(
+            #     m_1[xy_s], m_2[xy_s], m_3[xy_s]) if m_1 is not None else None
+            all_contours[index].append(winding_number)
 
-            # Set the image and pick a color map
-            im_to_show = p_subset if show == 'phis' else t_subset
-            cmap_to_show = ciecam02_cmap() if show == 'phis' else cm.coolwarm_r
-            cmap_max = 2 * np.pi if show == 'phis' else np.pi
-
-            # Create a pair of (x, y) coordinates
-            x = np.linspace(1, box_xd - 2, box_xd, dtype=np.uint8)
-            y = np.linspace(1, box_yd - 2, box_yd, dtype=np.uint8)
-            X, Y = np.meshgrid(x, y)
-
-            # Create vector lengths
-            U = np.ones_like(m_subset) if normalize else m_subset * \
-                np.cos(p_subset) * np.sin(t_subset)
-            V = np.ones_like(m_subset) if normalize else m_subset * \
-                np.sin(p_subset) * np.sin(t_subset)
-
-            # index_to_show = index if not show_both else 2 * index - 1
-            if plot_index % (num_columns * num_rows + 1) == 0:
-                num_rows += 1
-                n = len(fig.axes)
-
-                for i in range(n):
-                    fig.axes[i].change_geometry(num_rows, num_columns, i + 1)
-
-            # Create the axes
-            ax = plt.subplot(num_rows, num_columns, plot_index)
-            ax.autoscale()
-
-            # Show the feature and path
-            ax.imshow(im_to_show, cmap=cmap_to_show,
-                      vmin=0, vmax=cmap_max, origin=origin)
-            ax.imshow(masked_circles[xy_s],
-                      interpolation='none', alpha=alpha, origin=origin)
-            ax.add_artist(ScaleBar(scale, box_alpha=0.8))
-
-            title = f'({xmin}, {ymin}) to ({xmax}, {ymax}), ' \
-                    f'{width_nm}x{height_nm} nm\n' \
-                rf'$\alpha:\ {alpha_avg:.2f},\ \sigma_{{\alpha}}:\ {alpha_std:.2f}\quad $' \
-                rf'$\phi_{{dev}}:\ {dev_avg:.2f},\ \sigma_{{dev}}:\ {dev_std:.2f}$'
-            if winding_number:
-                title += rf'$\quad n: {winding_number:.2f}$'
-
-            ax.set_title(title if show_title else '')
-
-            # Place 4 dots to show the direction around the path
-            colors = itertools.cycle(['red', 'yellow', 'green', 'blue'])
-            num_pts = len(path)
-            pts = [path[0], path[int(num_pts / 4)], path[int(num_pts / 2)],
-                   path[int(3 * num_pts / 4)]]
-            for point in pts:
-                ax.scatter(point[0] - xmin, point[1] - ymin, c=next(colors))
-
-            if show_numbers:
-                c = 'red' if not candidate else 'blue'
-                # label = index if not candidate else fr'{index}$\circlearrowright$' \
-                #     if alpha_avg < np.pi else fr'{index}$\circlearrowleft$'
-                if alpha_avg < np.pi:
-                    label = fr'{index}$\circlearrowright$'
-                    cw += 1
-                else:
-                    label = fr'{index}$\circlearrowleft$'
-                    ccw += 1
-
-                t = ax.text(0, 0, label, fontdict={'fontsize': 20}, c=c,
-                            horizontalalignment='left', verticalalignment='top')
-                t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=c))
-
-            # Show the vectors
-            ax.quiver(X, Y, U, V, units='dots',
-                      angles=p_subset * 180 / np.pi, pivot='mid')
-
-            # Turn axis labels on or off
-            if show_axes:
-                x_span, y_span = width // 5, height // 5
-                ax.set_xticks(x[::x_span])
-                ax.set_xticklabels((x + xmin - 1).astype(int)[::x_span])
-                ax.set_yticks(y[::y_span])
-                ax.set_yticklabels((y + ymin - 1).astype(int)[::y_span])
+            if candidate:
+                candidates[index] = all_contours[index]
+                
+            if alpha_avg < np.pi:
+                cw += 1
             else:
-                ax.set_xticks([])
-                ax.set_yticks([])
+                ccw += 1
 
-            # Show alphas
-            xs = np.linspace(1, len(alphas) + 1, len(alphas))
-            # p = np.polyfit(xs, alphas, 3)
-            # alphas_fit = np.poly1d(p)
-            # window = 5
-            # cumsum = np.cumsum(np.insert(alphas, 0, 0))
-            # alphas_fit = (cumsum[window:] - cumsum[:-window]) / window
-            ax = plt.subplot(num_rows, num_columns, plot_index + 1)
-            ax.autoscale()
-            ax.plot(xs, alphas, '.', label=r'$\alpha$')
-            # ax.errorbar(xs, alphas, yerr=alpha_std,
-            # fmt='.', ms=6, label=r'$\alpha$')
-            ax.fill_between(xs, alphas + alpha_std,
-                            alphas - alpha_std, alpha=0.2)
-            # ax.plot(xs[2:-2], alphas_fit, '-', label='Moving average')
-            ax.axhline(alpha_avg, color='orange', ls='--', label='Average')
-            ax.axhline(np.pi, color='gray', alpha=0.4)
-            ax.set_ylim((0, 2 * np.pi))
-            ax.set_xticks([])
-            ax.set_yticks([0, np.pi / 2, np.pi, 3/2 * np.pi, 2 * np.pi])
-            ax.set_yticklabels(['0', r'$\dfrac{\pi}{2}$',
-                                r'$\pi$', r'$\dfrac{3\pi}{2}$', r'$2\pi$'])
+            if not skip_plot:
+                # Set the image and pick a color map
+                im_to_show = p_subset if show == 'phis' else t_subset
+                cmap_to_show = ciecam02_cmap() if show == 'phis' else cm.coolwarm_r
+                cmap_max = 2 * np.pi if show == 'phis' else np.pi
 
-            ax.set_title(
-                rf'$\alpha$: {alphas.min():.3f} to {alphas.max():.3f}')
-            plt.legend()
-            plot_index += 1
+                # Create a pair of (x, y) coordinates
+                x = np.linspace(1, box_xd - 2, box_xd, dtype=np.uint8)
+                y = np.linspace(1, box_yd - 2, box_yd, dtype=np.uint8)
+                X, Y = np.meshgrid(x, y)
 
-            if show_both:
-                p_m_subset = phis_m[xy_s]
+                # Create vector lengths
+                U = np.ones_like(m_subset) if normalize else m_subset * \
+                    np.cos(p_subset) * np.sin(t_subset)
+                V = np.ones_like(m_subset) if normalize else m_subset * \
+                    np.sin(p_subset) * np.sin(t_subset)
 
-                ax = plt.subplot(num_rows, num_columns, 2 * index)
+                # index_to_show = index if not show_both else 2 * index - 1
+                if plot_index % (num_columns * num_rows + 1) == 0:
+                    num_rows += 1
+                    n = len(fig.axes)
+
+                    for i in range(n):
+                        fig.axes[i].change_geometry(num_rows, num_columns, i + 1)
+
+                # Create the axes
+                ax = plt.subplot(num_rows, num_columns, plot_index)
                 ax.autoscale()
-                ax.imshow(p_m_subset, cmap=ciecam02_cmap())
-                ax.imshow(masked_circles[ymin:ymax, xmin:xmax], interpolation='none',
-                          alpha=alpha, cmap=cm.binary)
+
+                # Show the feature and path
+                ax.imshow(im_to_show, cmap=cmap_to_show,
+                        vmin=0, vmax=cmap_max, origin=origin)
+                ax.imshow(masked_circles[xy_s],
+                        interpolation='none', alpha=alpha, origin=origin)
                 ax.add_artist(ScaleBar(scale, box_alpha=0.8))
 
+                title = f'({xmin}, {ymin}) to ({xmax}, {ymax}), ' \
+                        f'{width_nm}x{height_nm} nm\n' \
+                    rf'$\alpha:\ {alpha_avg:.2f},\ \sigma_{{\alpha}}:\ {alpha_std:.2f}\quad $' \
+                    rf'$\phi_{{dev}}:\ {dev_avg:.2f},\ \sigma_{{dev}}:\ {dev_std:.2f}$'
+                if winding_number:
+                    title += rf'$\quad n: {winding_number:.2f}$'
+
+                ax.set_title(title if show_title else '')
+
+                # Place 4 dots to show the direction around the path
+                colors = itertools.cycle(['red', 'yellow', 'green', 'blue'])
+                num_pts = len(path)
+                pts = [path[0], path[int(num_pts / 4)], path[int(num_pts / 2)],
+                    path[int(3 * num_pts / 4)]]
+                for point in pts:
+                    ax.scatter(point[0] - xmin, point[1] - ymin, c=next(colors))
+
                 if show_numbers:
-                    t = ax.text(0, 0, index, fontdict={'fontsize': 20}, c='black',
+                    c = 'red' if not candidate else 'blue'
+                    # label = index if not candidate else fr'{index}$\circlearrowright$' \
+                    #     if alpha_avg < np.pi else fr'{index}$\circlearrowleft$'
+                    label = fr'{c_index}$\circlearrowright$' if alpha_avg < np.pi else fr'{c_index}$\circlearrowleft$'
+                    # if alpha_avg < np.pi:
+                    #     label = fr'{c_index}$\circlearrowright$'
+                    #     cw += 1
+                    # else:
+                    #     label = fr'{c_index}$\circlearrowleft$'
+                    #     ccw += 1
+
+                    t = ax.text(0, 0, label, fontdict={'fontsize': 20}, c=c,
                                 horizontalalignment='left', verticalalignment='top')
-                    t.set_bbox(
-                        dict(facecolor='white', alpha=0.8, edgecolor='black'))
+                    t.set_bbox(dict(facecolor='white', alpha=0.8, edgecolor=c))
 
+                # Show the vectors
                 ax.quiver(X, Y, U, V, units='dots',
-                          angles=p_subset * 180 / np.pi, color='white')
+                        angles=p_subset * 180 / np.pi, pivot='mid')
 
-                ax.set_title(title)
-                span = 5
-                ax.set_xticks(x[::span])
-                ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
-                ax.set_yticks(y[::span])
-                ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
+                # Turn axis labels on or off
+                if show_axes:
+                    x_span, y_span = width // 5, height // 5
+                    ax.set_xticks(x[::x_span])
+                    ax.set_xticklabels((x + xmin - 1).astype(int)[::x_span])
+                    ax.set_yticks(y[::y_span])
+                    ax.set_yticklabels((y + ymin - 1).astype(int)[::y_span])
+                else:
+                    ax.set_xticks([])
+                    ax.set_yticks([])
 
-            plot_index += 1 if not show_both else 2
+                # Show alphas
+                num_alphas = len(alphas)
+                xs = np.linspace(1, num_alphas + 1, num_alphas)
+                ax = plt.subplot(num_rows, num_columns, plot_index + 1)
+                ax.autoscale()
+                ax.plot(xs, alphas, '.', label=r'$\alpha$')
+                # ax.errorbar(xs, alphas, yerr=alpha_std,
+                # fmt='.', ms=6, label=r'$\alpha$')
+                ax.fill_between(xs, alphas + alpha_std,
+                                alphas - alpha_std, alpha=0.2)
+                # ax.plot(xs[2:-2], alphas_fit, '-', label='Moving average')
+                ax.axhline(alpha_avg, color='orange', ls='--', label=f'Average{new_line}MAE: {mae:.2f}{new_line}SEM: {sem:.2f}')
+                ax.axhline(alpha_avg + mae, color='green', ls='-.', alpha=0.2)
+                ax.axhline(alpha_avg - mae, color='green', ls='-.', alpha=0.2)
+                ax.axhline(np.pi, color='gray', ls='-', alpha=0.1)
+                ax.set_ylim((0, 2 * np.pi))
+                ax.set_xticks([])
+                ax.set_yticks([0, np.pi / 2, np.pi, 3/2 * np.pi, 2 * np.pi])
+                ax.set_yticklabels(['0', r'$\dfrac{\pi}{2}$',
+                                    r'$\pi$', r'$\dfrac{3\pi}{2}$', r'$2\pi$'])
+
+                ax.set_title(
+                    rf'$\alpha$: {alphas.min():.3f} to {alphas.max():.3f}, {alpha_avg:.3f} average')
+                plt.legend()
+                plot_index += 1
+
+                if show_both:
+                    p_m_subset = phis_m[xy_s]
+
+                    ax = plt.subplot(num_rows, num_columns, 2 * index)
+                    ax.autoscale()
+                    ax.imshow(p_m_subset, cmap=ciecam02_cmap())
+                    ax.imshow(masked_circles[ymin:ymax, xmin:xmax], interpolation='none',
+                            alpha=alpha, cmap=cm.binary)
+                    ax.add_artist(ScaleBar(scale, box_alpha=0.8))
+
+                    if show_numbers:
+                        t = ax.text(0, 0, index, fontdict={'fontsize': 20}, c='black',
+                                    horizontalalignment='left', verticalalignment='top')
+                        t.set_bbox(
+                            dict(facecolor='white', alpha=0.8, edgecolor='black'))
+
+                    ax.quiver(X, Y, U, V, units='dots',
+                            angles=p_subset * 180 / np.pi, color='white')
+
+                    ax.set_title(title)
+                    span = 5
+                    ax.set_xticks(x[::span])
+                    ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
+                    ax.set_yticks(y[::span])
+                    ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
+
+                plot_index += 1 if not show_both else 2
 
         index += 1
 
-    fig.set_size_inches(num_columns * column_width, num_rows * column_width)
+    if not skip_plot:
+        fig.set_size_inches(num_columns * column_width, num_rows * column_width)
 
     number_of_plots = np.min((show_limit, count))
     spurious = f' ({number_of_plots - cw - ccw} spurious contours)' if number_of_plots - \
         cw - ccw > 0 else ''
     print(f'Found {cw} clockwise and {ccw} anticlockwise contours{spurious}')
-
+    
     return candidates, all_contours
 
 
@@ -1313,10 +1422,10 @@ def show_contour_sizes(widths, heights, xerror, yerror, ltem_widths=None, ltem_h
     fig = plt.figure(figsize=(6, 6))
     ax = fig.add_subplot(111)
 
-    ax.errorbar(widths, heights, xerror, yerror, fmt='.', ms=6, label='SEMPA')
+    ax.errorbar(widths, heights, xerror, yerror, fmt='.', ms=6, label=f'SEMPA (avg: ({int(np.mean(widths))}, {int(np.mean(heights))}))')
     if ltem_widths is not None:
         ax.errorbar(ltem_widths, ltem_heights,
-                    ltem_xerror, ltem_yerror, fmt='.', ms=6, label='LTEM')
+                    ltem_xerror, ltem_yerror, fmt='.', ms=6, label=f'LTEM (avg: ({int(np.mean(ltem_widths))}, {int(np.mean(ltem_heights))}))')
 
     line = np.min((ax.get_xlim(), ax.get_ylim())), np.max(
         (ax.get_xlim(), ax.get_ylim()))
