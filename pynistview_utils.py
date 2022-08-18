@@ -1249,12 +1249,15 @@ def show_circles(magnitudes, phis, thetas, contours, scale, m_1=None, m_2=None, 
             t_subset = thetas[xy_s]
 
             # Determine winding number
-            mask = ~masked_circles.mask[xy_s]
-            m_1_masked = np.ma.masked_where(mask, m_1[xy_s])
-            m_2_masked = np.ma.masked_where(mask, m_2[xy_s])
-            m_3_masked = np.ma.masked_where(mask, m_3[xy_s])
-            winding_number = calculate_winding_number(
-                m_1_masked, m_2_masked, m_3_masked) if m_1 is not None else None
+            if m_1 is not None:
+                mask = ~masked_circles.mask[xy_s]
+                m_1_masked = np.ma.masked_where(mask, m_1[xy_s])
+                m_2_masked = np.ma.masked_where(mask, m_2[xy_s])
+                m_3_masked = np.ma.masked_where(mask, m_3[xy_s])
+                winding_number = calculate_winding_number(
+                    m_1_masked, m_2_masked, m_3_masked)
+            else:
+                winding_number = None
             # winding_number = calculate_winding_number(
             #     m_1[xy_s], m_2[xy_s], m_3[xy_s]) if m_1 is not None else None
             all_contours[index].append(winding_number)
@@ -1422,7 +1425,9 @@ def show_contour_sizes(widths, heights, xerror, yerror, ltem_widths=None, ltem_h
     fig = plt.figure(figsize=(6, 6))
     ax = fig.add_subplot(111)
 
-    ax.errorbar(widths, heights, xerror, yerror, fmt='.', ms=6, label=f'SEMPA (avg: ({int(np.mean(widths))}, {int(np.mean(heights))}))')
+    if len(widths) > 0:
+        ax.errorbar(widths, heights, xerror, yerror, fmt='.', ms=6, label=f'SEMPA (avg: ({int(np.mean(widths))}, {int(np.mean(heights))}))')
+
     if ltem_widths is not None:
         ax.errorbar(ltem_widths, ltem_heights,
                     ltem_xerror, ltem_yerror, fmt='.', ms=6, label=f'LTEM (avg: ({int(np.mean(ltem_widths))}, {int(np.mean(ltem_heights))}))')
