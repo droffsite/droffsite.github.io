@@ -292,14 +292,43 @@ def calculate_distance(x1, x2):
     return np.sqrt((x1[0] - x2[0]) ** 2 + (x1[1] - x2[1]) ** 2)
 
 
-def calculate_winding_number(x, y, z):
+def calculate_winding_number(x, y, z, xy_s=None, contour=None):
     """Calculate the winding number"""
 
     # n = 1/4pi int(M dot (dM/dx cross dMdy) dxdy)
     # Requires that M be normalized at all points
-    M = np.array(normalize_3d(x, y, z))
+    M = np.array(normalize_3d(x[xy_s], y[xy_s], z[xy_s]))
 
     dmdx, dmdy = np.gradient(M, axis=(2, 1))
+
+    if contour is not None:
+        _, _, width, height = cv2.boundingRect(contour)
+        mask_scale = 1 / np.minimum(height, width)
+
+        small_mask = scale_contour(contour, 1 - mask_scale)
+        large_mask = scale_contour(contour, 1 + mask_scale)
+        scaled_mask = np.append(contour, small_mask, axis=0)
+        scaled_mask = np.append(scaled_mask, large_mask, axis=0)
+
+        # mask = np.zeros_like(x)
+        # cv2.drawContours(mask, [scaled_mask], 0, 255, 1)
+        # reduced_mask = mask[xy_s]
+        reduced_mask = get_contour_mask(contour, x, xy_s)
+        # plt.imshow(mask[xy_s], cmap='gray')
+
+        masks = np.array([reduced_mask, reduced_mask, reduced_mask])
+
+        M = np.ma.masked_where(masks, M)
+        dmdx = np.ma.masked_where(masks, dmdx)
+        dmdx = np.ma.masked_where(masks, dmdx)
+
+        # M[0] = np.ma.masked_where(reduced_mask, M[0])
+        # M[1] = np.ma.masked_where(reduced_mask, M[1])
+        # M[2] = np.ma.masked_where(reduced_mask, M[2])
+
+        # dmdx = np.ma.masked_where(reduced_mask, dmdx)
+        # dmdy = np.ma.masked_where(reduced_mask, dmdy)
+
     cross_dmdx_dmdy = np.cross(dmdx, dmdy, axis=0)
     dot_m_dmdx_dmdy = np.einsum("i...,i...", M, cross_dmdx_dmdy)
 
@@ -353,7 +382,7 @@ def file_for(files, token):
     return files[[i for i, item in enumerate(files) if token in item]][0]
 
 
-def find_circular_contours(img, diff_axes_threshold=0.3, comparator="gt", show=False):
+def find_circular_contours(img, diff_threshold=0.3, comparator="gt", show=False):
     """Return an array of circular contours found in the input image. Also return the full array of contours."""
     circle_contours = []
 
@@ -395,15 +424,20 @@ def find_circular_contours(img, diff_axes_threshold=0.3, comparator="gt", show=F
         # (thus the if). Throw out anything where the major and minor axes are different by more
         # than the threshold
         width, height = cv2.fitEllipse(contour)[1]
-        expected_length = width + height * np.pi
+        avg_radius = (width + height) / 4
+        expected_length = 2 * avg_radius * np.pi
         length = cv2.arcLength(contour, True)
+        area = cv2.contourArea(contour)
+        expected_area = np.pi * avg_radius * avg_radius
 
         diff_dims = np.abs(width - height)
         diff_lengths = np.abs(expected_length - length)
+        diff_areas = np.abs(expected_area - area)
 
         if (
-            diff_dims < np.max([width, height]) * diff_axes_threshold
-            and diff_lengths < np.max([expected_length, length]) * diff_axes_threshold
+            diff_dims < np.max([width, height]) * diff_threshold
+            and diff_lengths < np.max([expected_length, length]) * diff_threshold
+            and diff_areas < np.max([expected_area, area]) * diff_threshold
         ):
             circle_contours.append(contour)
 
@@ -566,6 +600,21 @@ def get_bounding_boxes(contours):
     centers = [(x + int(x_ext / 2), y + int(y_ext / 2)) for x, y, x_ext, y_ext in boxes]
 
     return boxes, centers
+
+
+def get_contour_mask(contour, img, xy_s=None):
+    """Return an array corresponding the contour
+
+    Args:
+        contour (list of points): points in the contour
+        img (array): image array
+        xy_s (range): subsection of the image
+    """
+
+    mask = np.zeros_like(img)
+    cv2.drawContours(mask, [contour], 0, 255, 1)
+
+    return mask if xy_s is None else mask[xy_s]
 
 
 def get_file_key(file_path, key):
@@ -1020,6 +1069,7 @@ def segment_image(image, segments=1, adaptive=False, sel=circle_array(1), erode_
 def show_all_circles(
     img,
     contours,
+    phis=None,
     ax=None,
     show_numbers=True,
     reverse=False,
@@ -1051,37 +1101,38 @@ def show_all_circles(
 
     if ax is not None:
         cmap_to_show = cm.binary_r if color == "black" else cm.binary
-        ax.imshow(
-            masked_circles,
-            interpolation="none",
-            alpha=alpha,
-            cmap=cmap_to_show,
-            zorder=100,
-            origin=origin,
-        )
+        
+        if phis is None:
+            ax.imshow(
+                masked_circles,
+                interpolation="none",
+                alpha=alpha,
+                cmap=cmap_to_show,
+                zorder=100,
+                origin=origin,
+            )
+        else:
+            for index in range(len(boxes)):
+                contour = contours[index]
+                path = np.squeeze(contour)
+                _, _, alpha_avg, _, _, _ = get_phi_diff(path, phis, origin == "upper")
+                chirality = np.pi / 2 if alpha_avg < np.pi else 3 * np.pi / 2
+                m = get_contour_mask(contour, phis)
+                mask = np.ma.masked_where(m == 0, m) / 255 * chirality
+
+                ax.imshow(mask, interpolation="none", alpha=alpha, origin=origin, vmin=0, vmax=2 * np.pi, cmap="plasma_r")
 
         if show_numbers:
-            index = 1
-
-            for box in boxes:
+            for index in range(len(boxes)):
                 ax.text(
-                    centers[index - 1][0],
-                    centers[index - 1][1],
-                    index,
+                    centers[index][0],
+                    centers[index][1],
+                    index + 1,
                     alpha=alpha,
                     color=color,
                     horizontalalignment="center",
                     verticalalignment="center",
                 )
-                index += 1
-                # path = np.squeeze(contours[index - 1])
-                # xmin, ymin, width, height = box
-                # colors = itertools.cycle(['red', 'yellow', 'green', 'blue'])
-                # num_pts = len(path)
-                # pts = [path[0], path[int(num_pts / 4)], path[int(num_pts / 2)],
-                #     path[int(3 * num_pts / 4)]]
-                # for point in pts:
-                #     ax.scatter(point[0] - xmin, point[1] - ymin, c=next(colors))
 
         if not show_axes:
             ax.set_xticks([])
@@ -1236,6 +1287,7 @@ def show_alphas_2(
             density=True,
             zorder=2,
             alpha=0.6,
+            color="green",
             label="All SEMPA",
         )
     l_hist_arr, l_hist_bins, _ = plt.hist(alphas_ltem, density=True, zorder=1, bins=30, alpha=0.3, label="LTEM")
@@ -1264,7 +1316,7 @@ def show_alphas_2(
     _, y_lim = plt.ylim()
     shift_x_pos = 0
     shift_x_neg = 0.35
-    colors = {"circles": "blue", "all": "orange", "ltem": "green"}
+    colors = {"circles": "blue", "all": "green", "ltem": "orange"}
     c_y_adjust, a_y_adjust, l_y_adjust = 0.87, 0.7, 0.53
     box_alpha = 0.7
     zline, zbox = 20, 30
@@ -1407,6 +1459,7 @@ def show_circles(
     while c_index < len(boxes) and displayed < show_limit:
         # for box in boxes[:show_limit]:
         box = boxes[c_index]
+        contour = contours[c_index]
         c_index += 1
 
         xmin, ymin, width, height = box
@@ -1421,6 +1474,7 @@ def show_circles(
         sem = alpha_std / np.sqrt(len(alphas))
         fake_news = np.ptp(alphas) >= np.pi if not show_anyway else False
         candidate = alpha_std <= candidate_cutoff and not fake_news
+        chirality = np.pi / 2 if alpha_avg < np.pi else 3 * np.pi / 2
 
         all_contours[index] = [
             dev_avg,
@@ -1452,15 +1506,9 @@ def show_circles(
 
             # Determine winding number
             if m_1 is not None:
-                mask = ~masked_circles.mask[xy_s]
-                m_1_masked = np.ma.masked_where(mask, m_1[xy_s])
-                m_2_masked = np.ma.masked_where(mask, m_2[xy_s])
-                m_3_masked = np.ma.masked_where(mask, m_3[xy_s])
-                winding_number = calculate_winding_number(m_1_masked, m_2_masked, m_3_masked)
+                winding_number = calculate_winding_number(m_1, m_2, m_3, xy_s, contour)
             else:
                 winding_number = None
-            # winding_number = calculate_winding_number(
-            #     m_1[xy_s], m_2[xy_s], m_3[xy_s]) if m_1 is not None else None
             all_contours[index].append(winding_number)
 
             if candidate:
@@ -1500,12 +1548,9 @@ def show_circles(
 
                 # Show the feature and path
                 ax.imshow(im_to_show, cmap=cmap_to_show, vmin=0, vmax=cmap_max, origin=origin)
-                ax.imshow(
-                    masked_circles[xy_s],
-                    interpolation="none",
-                    alpha=alpha,
-                    origin=origin,
-                )
+                m = get_contour_mask(contour, m_1, xy_s)
+                mask = np.ma.masked_where(m == 0, m) / 255 * chirality
+                ax.imshow(mask, interpolation="none", alpha=0.7, origin=origin, vmin=0, vmax=2 * np.pi, cmap="plasma_r")
                 ax.add_artist(ScaleBar(scale, box_alpha=0.8))
 
                 title = (
@@ -1532,16 +1577,8 @@ def show_circles(
                     ax.scatter(point[0] - xmin, point[1] - ymin, c=next(colors))
 
                 if show_numbers:
-                    c = "red" if not candidate else "blue"
-                    # label = index if not candidate else fr'{index}$\circlearrowright$' \
-                    #     if alpha_avg < np.pi else fr'{index}$\circlearrowleft$'
+                    c = "blue" if candidate else "red"
                     label = rf"{c_index}$\circlearrowright$" if alpha_avg < np.pi else rf"{c_index}$\circlearrowleft$"
-                    # if alpha_avg < np.pi:
-                    #     label = fr'{c_index}$\circlearrowright$'
-                    #     cw += 1
-                    # else:
-                    #     label = fr'{c_index}$\circlearrowleft$'
-                    #     ccw += 1
 
                     t = ax.text(
                         0,
@@ -1710,6 +1747,7 @@ def show_contours_overview(
     thetas_flattened,
     phis_flattened,
     contours_g,
+    circular_contours,
     magnitudes_2d_flattened,
     axis_1,
     axis_2,
@@ -1720,29 +1758,42 @@ def show_contours_overview(
     ax1 = fig.add_subplot(221)
     ax1.imshow(thetas_flattened, cmap=cm.coolwarm_r)
 
-    show_all_circles(thetas_flattened, contours_g, ax1, alpha=0.5)
+    show_all_circles(thetas_flattened, contours_g, phis=phis_flattened, ax=ax1, alpha=0.7)
 
     sm = cm.ScalarMappable(cmap=cm.coolwarm)
     cbar = fig.colorbar(sm, ax=ax1, shrink=0.3)
     cbar.set_ticks([0, 0.5, 1])
     cbar.ax.set_yticklabels(["Down", f"{axis_1}-{axis_2}", "Up"])
-    # cbar.set_label('Magnetization in Z');
-    # ax1.imshow(masked_circles, interpolation='none')
     ax1.set_title(rf"M$_{axis_3}$ magnetization")
 
-    ax2 = fig.add_subplot(222, polar=True)
-    show_phase_colors_circle(ax2, add_dark_background=False, text_color="black")
+    # ax2 = fig.add_subplot(222, polar=True)
+    # show_phase_colors_circle(ax2, add_dark_background=False, text_color="black")
+
+    ax2 = fig.add_subplot(222)
+    ax2.imshow(thetas_flattened, cmap=cm.coolwarm_r)
+
+    show_all_circles(thetas_flattened, circular_contours, phis=phis_flattened, ax=ax2, alpha=0.7)
+
+    sm = cm.ScalarMappable(cmap=cm.coolwarm)
+    cbar = fig.colorbar(sm, ax=ax2, shrink=0.3)
+    cbar.set_ticks([0, 0.5, 1])
+    cbar.ax.set_yticklabels(["Down", f"{axis_1}-{axis_2}", "Up"])
+    # cbar.set_label('Magnetization in Z');
+    # ax1.imshow(masked_circles, interpolation='none')
+    ax2.set_title(rf"M$_{axis_3}$ magnetization (circular)")
 
     ax3 = fig.add_subplot(223)
-    ax3.imshow(phis_flattened, cmap=ciecam02_cmap())
-    show_all_circles(thetas_flattened, contours_g, ax3, alpha=0.5, color="white")
+    ax3.imshow(phis_flattened, cmap=ciecam02_cmap(), alpha=0.7)
+    show_all_circles(thetas_flattened, contours_g, phis=phis_flattened, ax=ax3, alpha=0.7, color="white")
+    ax32 = inset_axes(ax3, width="15%", height="15%", loc=4, axes_class=get_projection_class("polar"))
+    show_phase_colors_circle(ax32, add_dark_background=False, show_angles=False)
 
     ax3.set_title(rf"M$_{axis_1}$-M$_{axis_2}$ plane")
 
     ax4 = fig.add_subplot(224)
     phis_flattened_rgba = render_phases_and_magnitudes(phis_flattened, magnitudes_2d_flattened)
     ax4.imshow(phis_flattened_rgba, cmap=ciecam02_cmap())
-    show_all_circles(thetas_flattened, contours_g, ax4, alpha=0.5, color="white")
+    show_all_circles(thetas_flattened, contours_g, ax=ax4, alpha=0.5, color="white")
 
     sm = cm.ScalarMappable(cmap=cm.binary_r)
     cbar = fig.colorbar(sm, ax=ax4, shrink=0.3)
@@ -1752,13 +1803,13 @@ def show_contours_overview(
     ax4.set_title(rf"M$_{axis_1}$-M$_{axis_2}$ plane with magnitude")
 
 
-def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True):
+def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True, origin="upper"):
     """Plot groups of circular contours"""
-    groups, _ = find_group_contours(contours)
+    groups, loners = find_group_contours(contours)
 
     group_count = len(groups)
 
-    # print(f'{group_count} groups:\n{groups}\n\n{len(loners)} loners:\n{loners}')
+    print(f"{group_count} groups:\n{groups}\n\n{len(loners)} loners:\n{loners}")
     contour_groups = [[np.concatenate([np.squeeze(c) for c in [contours[i] for i in g]])] for g in groups]
 
     boxes_g = [get_bounding_boxes(cg) for cg in contour_groups]
@@ -1768,13 +1819,14 @@ def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True):
     num_rows = np.ceil(group_count / num_cols).astype(int)
 
     plt.figure(figsize=(num_cols * col_width, num_rows * col_width))
-    masked_circles, _, _ = show_all_circles(thetas, contours)
 
     for index in range(group_count):
         box, group = boxes_g[index], groups[index]
         xmin, ymin, width, height = np.squeeze(box[0])
         xmax, ymax = xmin + width, ymin + height
         box_xd, box_yd = xmax - xmin, ymax - ymin
+        y_s, x_s = slice(ymin, ymax), slice(xmin, xmax)
+        xy_s = (y_s, x_s)
 
         _, centers = get_bounding_boxes([contours[i] for i in group])
 
@@ -1790,15 +1842,26 @@ def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True):
         U = np.ones_like(m_subset) if normalize else m_subset * np.cos(p_subset) * np.sin(t_subset)
         V = np.ones_like(m_subset) if normalize else m_subset * np.sin(p_subset) * np.sin(t_subset)
 
+        # Plot the background
         ax = plt.subplot(num_rows, num_cols, index + 1)
         ax.imshow(
             thetas[ymin:ymax, xmin:xmax],
             cmap=cm.coolwarm_r,
-            alpha=0.8,
+            alpha=0.6,
             vmin=0,
             vmax=np.pi,
         )
-        ax.imshow(masked_circles[ymin:ymax, xmin:xmax], interpolation="none", alpha=0.5)
+
+        for contour_index in group:
+            contour = contours[contour_index]
+            path = np.squeeze(contour)
+            _, _, alpha_avg, _, _, _ = get_phi_diff(path, phis, origin == "upper")
+            chirality = np.pi / 2 if alpha_avg < np.pi else 3 * np.pi / 2
+            m = get_contour_mask(contour, magnitudes, xy_s)
+            mask = np.ma.masked_where(m == 0, m) / 255 * chirality
+
+            ax.imshow(mask, interpolation="none", alpha=0.7, origin=origin, vmin=0, vmax=2 * np.pi, cmap="plasma_r")
+
         ax.quiver(X, Y, U, V, units="dots", angles=p_subset * 180 / np.pi, pivot="mid")
 
         for l_index in range(len(centers)):
@@ -1819,6 +1882,7 @@ def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True):
         ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
         ax.set_yticks(y[::span])
         ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
+        ax.add_artist(ScaleBar(scale, box_alpha=0.8, location="lower right"))
 
         title = (
             f"({xmin}, {ymin}) to ({xmax}, {ymax}), "
@@ -1855,7 +1919,7 @@ def show_ltem_data(
     show_all_circles(
         np.zeros_like(magnitudes_reduced),
         ltem_contours_reduced,
-        ax1,
+        ax=ax1,
         color="white",
         origin="lower",
         show_numbers=False,
@@ -1872,7 +1936,7 @@ def show_ltem_data(
     show_all_circles(
         np.zeros_like(magnitudes_reduced),
         ltem_contours_reduced,
-        ax2,
+        ax=ax2,
         color="yellow",
         origin="lower",
         show_numbers=False,
@@ -1993,15 +2057,16 @@ def show_phase_colors_circle(ax=None, add_dark_background=True, text_color="whit
         fig = plt.figure()
         ax = fig.add_axes([0.1, 0.1, 0.8, 0.8], polar=True)
 
+    ax.patch.set_alpha(0)
+
     fig = plt.gcf()
 
     if add_dark_background:
         dark = "#3A404C"
-        # fig.patch.set_facecolor(dark)
         ax.patch.set_facecolor(dark)
         text_color = dark
     else:
-        fig.patch.set_facecolor("white")
+        ax.patch.set_facecolor("white")
         text_color = "black"
 
     # Plot a color mesh on the polar plot with the color set by the angle
@@ -2076,6 +2141,22 @@ def show_vector_plot(im_x, im_y, ax=None, color="white", scale=2, divisor=32):
 
     # Show the plot
     ax.quiver(x, y, Xs, Ys, angles="uv", scale_units="dots", color=color, scale=scale)
+
+
+def show_winding_numbers(candidates, all):
+    """Plot histogram of winding numbers
+
+    Args:
+        candidates (list): Winding numbers for candidate features
+        all (list): Winding numbers for all features
+    """
+    bins = 8
+
+    plt.hist(candidates, bins=bins, density=True, zorder=10, alpha=0.8, label="Candidates")
+    plt.hist(all, bins=bins, density=True, zorder=1, histtype="step", label="All")
+    plt.legend()
+    plt.xlabel("Winding number")
+    plt.yticks([])
 
 
 def display_results(
