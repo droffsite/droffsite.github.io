@@ -292,7 +292,7 @@ def calculate_distance(x1, x2):
     return np.sqrt((x1[0] - x2[0]) ** 2 + (x1[1] - x2[1]) ** 2)
 
 
-def calculate_winding_number(x, y, z, xy_s=None, contour=None):
+def calculate_winding_number(x, y, z, xy_s=None, contour=None, wider_contour=True):
     """Calculate the winding number"""
 
     # n = 1/4pi int(M dot (dM/dx cross dMdy) dxdy)
@@ -313,12 +313,12 @@ def calculate_winding_number(x, y, z, xy_s=None, contour=None):
         # mask = np.zeros_like(x)
         # cv2.drawContours(mask, [scaled_mask], 0, 255, 1)
         # reduced_mask = mask[xy_s]
-        reduced_mask = get_contour_mask(contour, x, xy_s)
+        reduced_mask = get_contour_mask(scaled_mask if wider_contour else contour, x, xy_s)
         # plt.imshow(mask[xy_s], cmap='gray')
 
         masks = np.array([reduced_mask, reduced_mask, reduced_mask])
 
-        M = np.ma.masked_where(masks, M)
+        # M = np.ma.masked_where(masks, M)
         dmdx = np.ma.masked_where(masks, dmdx)
         dmdx = np.ma.masked_where(masks, dmdx)
 
@@ -382,13 +382,13 @@ def file_for(files, token):
     return files[[i for i, item in enumerate(files) if token in item]][0]
 
 
-def find_circular_contours(img, diff_threshold=0.3, comparator="gt", show=False):
+def find_circular_contours(img, diff_threshold=0.3, comparator="gt", show=False, ltem=False):
     """Return an array of circular contours found in the input image. Also return the full array of contours."""
     circle_contours = []
 
     # Work on the values above (default) or below the mean
-    threshold = img.mean()
-    # threshold = np.pi / 2
+    # threshold = img.mean()
+    threshold = np.pi / 2 if not ltem else img.mean()
     ups = np.where(img > threshold, 255, 0) if comparator == "gt" else np.where(img < threshold, 255, 0)
     # ups = np.logical_and(0.9 * np.pi / 2 <= img, img <= 1.1 * np.pi / 2)
 
@@ -422,7 +422,7 @@ def find_circular_contours(img, diff_threshold=0.3, comparator="gt", show=False)
     for contour in [c for c in contours_g if len(c) > 4]:
         # Fit the contour to an ellipse. This requires there be at least 5 points in the contour
         # (thus the if). Throw out anything where the major and minor axes are different by more
-        # than the threshold
+        # than the threshold. Also check the area, as other shapes would meet the above.
         width, height = cv2.fitEllipse(contour)[1]
         avg_radius = (width + height) / 4
         expected_length = 2 * avg_radius * np.pi
@@ -436,8 +436,8 @@ def find_circular_contours(img, diff_threshold=0.3, comparator="gt", show=False)
 
         if (
             diff_dims < np.max([width, height]) * diff_threshold
-            and diff_lengths < np.max([expected_length, length]) * diff_threshold
             and diff_areas < np.max([expected_area, area]) * diff_threshold
+            # and diff_lengths < np.max([expected_length, length]) * diff_threshold
         ):
             circle_contours.append(contour)
 
@@ -851,7 +851,7 @@ def process_ltem_data(ltem_data_path):
     ltem_height, ltem_width = ltem_magnitudes.shape
     size = ltem_width
 
-    ltem_circular_contours, ltem_contours_g, _ = find_circular_contours(ltem_magnitudes)
+    ltem_circular_contours, ltem_contours_g, _ = find_circular_contours(ltem_magnitudes, ltem=True)
     ltem_circular_contours = [c for c in ltem_circular_contours if len(c) > 0.05 * size and len(c) < 0.4 * size]
     ltem_circular_contours = [scale_contour(c, 1.3) for c in ltem_circular_contours]
     ltem_circular_contours = [c for c in ltem_circular_contours if np.min(c) >= 0 and np.max(c) < size]
@@ -1101,7 +1101,7 @@ def show_all_circles(
 
     if ax is not None:
         cmap_to_show = cm.binary_r if color == "black" else cm.binary
-        
+
         if phis is None:
             ax.imshow(
                 masked_circles,
@@ -1120,7 +1120,9 @@ def show_all_circles(
                 m = get_contour_mask(contour, phis)
                 mask = np.ma.masked_where(m == 0, m) / 255 * chirality
 
-                ax.imshow(mask, interpolation="none", alpha=alpha, origin=origin, vmin=0, vmax=2 * np.pi, cmap="plasma_r")
+                ax.imshow(
+                    mask, interpolation="none", alpha=alpha, origin=origin, vmin=0, vmax=2 * np.pi, cmap="plasma_r"
+                )
 
         if show_numbers:
             for index in range(len(boxes)):
@@ -1506,7 +1508,7 @@ def show_circles(
 
             # Determine winding number
             if m_1 is not None:
-                winding_number = calculate_winding_number(m_1, m_2, m_3, xy_s, contour)
+                winding_number = calculate_winding_number(m_1, m_2, m_3, xy_s, contour, wider_contour=False)
             else:
                 winding_number = None
             all_contours[index].append(winding_number)
@@ -1752,6 +1754,7 @@ def show_contours_overview(
     axis_1,
     axis_2,
     axis_3,
+    scale,
 ):
     fig = plt.figure(figsize=(20, 20))
 
@@ -1764,6 +1767,7 @@ def show_contours_overview(
     cbar = fig.colorbar(sm, ax=ax1, shrink=0.3)
     cbar.set_ticks([0, 0.5, 1])
     cbar.ax.set_yticklabels(["Down", f"{axis_1}-{axis_2}", "Up"])
+    ax1.add_artist(ScaleBar(scale, box_alpha=0.8))
     ax1.set_title(rf"M$_{axis_3}$ magnetization")
 
     # ax2 = fig.add_subplot(222, polar=True)
@@ -1778,8 +1782,7 @@ def show_contours_overview(
     cbar = fig.colorbar(sm, ax=ax2, shrink=0.3)
     cbar.set_ticks([0, 0.5, 1])
     cbar.ax.set_yticklabels(["Down", f"{axis_1}-{axis_2}", "Up"])
-    # cbar.set_label('Magnetization in Z');
-    # ax1.imshow(masked_circles, interpolation='none')
+    ax2.add_artist(ScaleBar(scale, box_alpha=0.8))
     ax2.set_title(rf"M$_{axis_3}$ magnetization (circular)")
 
     ax3 = fig.add_subplot(223)
@@ -1787,7 +1790,7 @@ def show_contours_overview(
     show_all_circles(thetas_flattened, contours_g, phis=phis_flattened, ax=ax3, alpha=0.7, color="white")
     ax32 = inset_axes(ax3, width="15%", height="15%", loc=4, axes_class=get_projection_class("polar"))
     show_phase_colors_circle(ax32, add_dark_background=False, show_angles=False)
-
+    ax3.add_artist(ScaleBar(scale, box_alpha=0.8))
     ax3.set_title(rf"M$_{axis_1}$-M$_{axis_2}$ plane")
 
     ax4 = fig.add_subplot(224)
@@ -1799,7 +1802,7 @@ def show_contours_overview(
     cbar = fig.colorbar(sm, ax=ax4, shrink=0.3)
     cbar.set_ticks([0, 1])
     cbar.ax.set_yticklabels([f"All {axis_3}", f"All {axis_1}-{axis_2}"])
-
+    ax4.add_artist(ScaleBar(scale, box_alpha=0.8))
     ax4.set_title(rf"M$_{axis_1}$-M$_{axis_2}$ plane with magnitude")
 
 
