@@ -424,19 +424,20 @@ def find_circular_contours(img, diff_threshold=0.3, comparator="gt", show=False,
         # (thus the if). Throw out anything where the major and minor axes are different by more
         # than the threshold. Also check the area, as other shapes would meet the above.
         width, height = cv2.fitEllipse(contour)[1]
-        avg_radius = (width + height) / 4
-        expected_length = 2 * avg_radius * np.pi
-        length = cv2.arcLength(contour, True)
-        area = cv2.contourArea(contour)
-        expected_area = np.pi * avg_radius * avg_radius
+        # avg_radius = (width + height) / 4
+        # expected_length = 2 * avg_radius * np.pi
+        # length = cv2.arcLength(contour, True)
+        # area = cv2.contourArea(contour)
+        # expected_area = np.pi * avg_radius * avg_radius
 
         diff_dims = np.abs(width - height)
-        diff_lengths = np.abs(expected_length - length)
-        diff_areas = np.abs(expected_area - area)
+        # diff_lengths = np.abs(expected_length - length)
+        # diff_areas = np.abs(expected_area - area)
 
         if (
             diff_dims < np.max([width, height]) * diff_threshold
-            and diff_areas < np.max([expected_area, area]) * diff_threshold
+            and is_contour_circular(contour, diff_threshold)
+            # and diff_areas < np.max([expected_area, area]) * diff_threshold
             # and diff_lengths < np.max([expected_length, length]) * diff_threshold
         ):
             circle_contours.append(contour)
@@ -781,6 +782,26 @@ def import_files(name, runs, indir):
     image_dict["magnification"] = magnification
 
     return image_dict
+
+
+def is_contour_circular(contour, threshold=0.2):
+    """Determine if the area of the contour is circular
+
+    Args:
+        contour (contour): The contour to examine
+        threshold (float): Acceptable eccentricity; 0 = exact circle
+
+    Returns:
+        boolean: Is it a circle (within threshold)?
+    """
+    width, height = cv2.fitEllipse(contour)[1]
+    avg_radius = (width + height) / 4
+    area = cv2.contourArea(contour)
+    expected_area = np.pi * avg_radius * avg_radius
+
+    diff_areas = np.abs(expected_area - area)
+    
+    return diff_areas < area * threshold
 
 
 def limit_to(image, sigma=3):
@@ -1513,8 +1534,10 @@ def show_circles(
                 winding_number = None
             all_contours[index].append(winding_number)
 
-            if candidate:
+            if candidate and is_contour_circular(contour):
                 candidates[index] = all_contours[index]
+            else:
+                candidate = False
 
             if alpha_avg < np.pi:
                 cw += 1
@@ -1594,7 +1617,7 @@ def show_circles(
                     t.set_bbox(dict(facecolor="white", alpha=0.8, edgecolor=c))
 
                 # Show the vectors
-                ax.quiver(X, Y, U, V, units="dots", angles=p_subset * 180 / np.pi, pivot="mid")
+                ax.quiver(X, Y, U, V, angles=p_subset * 180 / np.pi, pivot="mid", units="dots")
 
                 # Turn axis labels on or off
                 if show_axes:
@@ -2016,9 +2039,11 @@ def show_magnitude_distribution(magnitudes):
     ax = plt.subplot(111)
     n, _, _ = ax.hist(magnitudes.flatten(), bins=bins, zorder=10)
     max_count = max(n)
-    avg = (1 + 2 * np.squeeze(np.where(n == max_count))[()]) / (2 * bins)
-    spline = UnivariateSpline(np.linspace(0, 1, bins), n - max_count / 2, s=0)
+    avg = (1 + 2 * np.squeeze(np.where(n == max_count))[()]) / (2 * bins) * np.max(magnitudes)
+    spline = UnivariateSpline(np.linspace(0, np.max(magnitudes), bins), n - max_count / 2, s=0)
     plt.axvspan(*spline.roots(), facecolor="gray", alpha=0.4, zorder=0)
+    
+    ax.set_xlim(0, np.max(magnitudes));
     ax.set_title(f"Magnitudes normalized (max count at {avg:.2f})")
 
 
@@ -2155,8 +2180,10 @@ def show_winding_numbers(candidates, all):
     """
     bins = 8
 
+    plt.figure(figsize=(12, 6))
     plt.hist(candidates, bins=bins, density=True, zorder=10, alpha=0.8, label="Candidates")
     plt.hist(all, bins=bins, density=True, zorder=1, histtype="step", label="All")
+    plt.xlim(1.1 * min(candidates + all), 1.1 * max(candidates + all))
     plt.legend()
     plt.xlabel("Winding number")
     plt.yticks([])
