@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 from matplotlib.projections import get_projection_class
 from matplotlib_scalebar.scalebar import ScaleBar
+import matplotlib.gridspec as gs
+
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
@@ -495,6 +497,34 @@ def find_group_contours(contours):
     return groups, loners
 
 
+def find_minimum_in_contour(cnt, img, count=100):
+    """Find the coordinates of the first of count minima in img that are inside cnt
+
+    Args:
+        cnt (List of points): The contour
+        img (2d image array): The image
+        count (int, optional): The number of minima to find. Defaults to 100.
+
+    Returns:
+        tuple: First minimum found in the contour
+    """
+    # Just examine the subset of img that's in the region of the contour
+    boxes, _ = get_bounding_boxes([cnt])
+    xmin, ymin, xext, yext = boxes[0]
+    img_subset = img[ymin : ymin + yext, xmin : xmin + xext]
+
+    # Find the sorted list of indices for minima, then check if they are in the contour
+    # Need to shift the points since they're from a subset of img
+    minima = np.array(np.unravel_index(np.argsort(img_subset.ravel())[:count], (img_subset.shape))).T
+    in_check = [cv2.pointPolygonTest(cnt, (m[1] + xmin, m[0] + ymin), False) for m in minima]
+
+    # Any indices in the contour will put a 1 in in_check; get the first one, then shift it
+    raw_point = minima[in_check.index(1)]
+    point = (raw_point[1] + xmin, raw_point[0] + ymin)
+
+    return point
+
+
 def find_neighbors_for(indices, boxes, distances, neighbors=[], threshold=2):
     """Find nearest neighbors in to incoming indices."""
 
@@ -604,7 +634,7 @@ def get_bounding_boxes(contours):
 
 
 def get_contour_mask(contour, img, xy_s=None):
-    """Return an array corresponding the contour
+    """Return an array corresponding to the contour
 
     Args:
         contour (list of points): points in the contour
@@ -669,21 +699,17 @@ def get_phases(im_x, im_y, im_z=None):
     return (np.asarray(phis), thetas)
 
 
-def get_phi_diff(path, phis, flip_y=True):
+def get_phi_diff(path, phis, thetas, mod=2 * np.pi, flip_y=True):
     """Determine the average angle of magnetization relative to the
     contour it circles."""
+    # Flip the sign of y for matplotlib (y=0 is at the top)
+    factor = -1 if flip_y else 1
 
     # Determine the angle along the path from point to point. Need to
     # roll to connect end to beginning.
     path_diff = np.roll(path, -2) - path
-
-    # Flip the sign of y for matplotlib (y=0 is at the top)
-    factor = -1 if flip_y else 1
     path_angle = np.arctan2(factor * path_diff[:, 1], path_diff[:, 0])
-
-    # Adjust range to 0..2 pi
-    path_angle %= 2 * np.pi
-    # print(f'Path angle: {path_angle}')
+    # print(f"Path angle: {path_angle}")
 
     # Collect the phis along the path and subtract them from the path angles
     phis_path = np.array([phis[point[1], point[0]] for point in path])
@@ -691,11 +717,26 @@ def get_phi_diff(path, phis, flip_y=True):
     # print(f'Phis path: {phis_path}')
     # print(f'Phis diff: {phis_diff}')
 
+    # Find the minimum theta inside the path for calculating alpha
+    if thetas is not None:
+        center = find_minimum_in_contour(path, thetas)
+        center_diff = center - np.roll(path, -2)
+        center_angle = np.arctan2(center_diff[:, 1], center_diff[:, 0])
+           
+        thetas_gradient = np.gradient(thetas)
+        grad_angle = np.arctan2(*thetas_gradient)
+        thetas_angle = np.array([grad_angle[point[1], point[0]] for point in path])
+        # print(f'Thetas gradient path: {thetas_angle}')
+ 
     # Calculate alpha per JC's definition: deviation from domain wall normal traveling
     # from low M_z to high M_z. Alpha ranges from 0 to 2 pi. The path goes clockwise
     # around the contour. For now, assume the center of the contour is where high M_z
     # is, thus clockwise travel should be pi/2 while anticlockwise should be 3/2 pi.
-    alphas = (phis_diff + np.pi / 2) % (2 * np.pi)
+    # Also: take a mod
+    # alphas = (phis_path + center_angle) % mod
+    # alphas = (phis_diff + np.pi / 2) % mod
+    alphas = (phis_path + thetas_angle - np.pi) % mod if thetas is not None else (phis_diff + np.pi / 2) % mod
+    
     # print(f'\N{greek small letter phi}: {np.min(phis_diff):.2f} to {np.max(phis_diff):.2f}; '\
     #       f'\N{greek small letter alpha}: {np.min(alphas):.2f} to {np.max(alphas):.2f}')
 
@@ -800,7 +841,7 @@ def is_contour_circular(contour, threshold=0.2):
     expected_area = np.pi * avg_radius * avg_radius
 
     diff_areas = np.abs(expected_area - area)
-    
+
     return diff_areas < area * threshold
 
 
@@ -1022,27 +1063,47 @@ def save_intensity_images(path, figsize=(3, 3), dpi=300):
         plt.close()
 
 
-def scale_contour(cnt, scale):
+def scale_contour(cnt, scale, center_of=None):
     """Scale a contour.
 
     Args:
         cnt (list of points): Contour to be scaled
         scale (float): Scale factor
+        center_of (image): Optional image with origin point
 
     Returns:
-        _type_: _description_
+        list of points: The scaled contour
     """
-    # Translate to the origin, scale points, translate back to the starting point
-    M = cv2.moments(cnt)
-    cx = int(M["m10"] / M["m00"])
-    cy = int(M["m01"] / M["m00"])
+    if center_of is None:
+        # Find the centroid
+        M = cv2.moments(cnt)
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+    else:
+        cx, cy = find_minimum_in_contour(cnt, center_of)
 
+    # Translate the points, scale, translate back
     cnt_norm = cnt - [cx, cy]
     cnt_scaled = cnt_norm * scale
     cnt_scaled = cnt_scaled + [cx, cy]
     cnt_scaled = cnt_scaled.astype(np.int32)
 
-    return cnt_scaled
+    # Remove dupes
+    # print(cnt_scaled)
+    if scale < 1:
+        cnt1 = [cnt_scaled[0]]
+        # print(f'Start: {cnt1} from {cnt_scaled[0]} from shape {cnt_scaled.shape}')
+        for i in range(1, len(cnt_scaled)):
+            # print(f'{i}: {cnt_scaled[i]}')
+            current = cnt_scaled[i]
+            last = cnt1[-1]
+            if not (current[0][0] == last[0][0] and current[0][1] == last[0][1]):
+                cnt1.append(current)
+                # print(cnt1)
+    else:
+        cnt1 = cnt_scaled
+
+    return cnt1
 
 
 def segment_image(image, segments=1, adaptive=False, sel=circle_array(1), erode_iter=1, close_iter=7):
@@ -1091,6 +1152,7 @@ def show_all_circles(
     img,
     contours,
     phis=None,
+    thetas=None,
     ax=None,
     show_numbers=True,
     reverse=False,
@@ -1136,7 +1198,7 @@ def show_all_circles(
             for index in range(len(boxes)):
                 contour = contours[index]
                 path = np.squeeze(contour)
-                _, _, alpha_avg, _, _, _ = get_phi_diff(path, phis, origin == "upper")
+                _, _, alpha_avg, _, _, _ = get_phi_diff(path, phis, thetas, origin == "upper")
                 chirality = np.pi / 2 if alpha_avg < np.pi else 3 * np.pi / 2
                 m = get_contour_mask(contour, phis)
                 mask = np.ma.masked_where(m == 0, m) / 255 * chirality
@@ -1168,15 +1230,16 @@ def show_alphas(
     contours_g,
     circular_contours,
     phis,
+    thetas,
     name,
     show_circles_separately=True,
     bins=20,
     ltem_data=None,
     show_title=True,
 ):
-    all_alphas = np.asarray([get_phi_diff(np.squeeze(c), phis) for c in contours_g])
+    all_alphas = np.asarray([get_phi_diff(np.squeeze(c), phis, thetas) for c in contours_g])
 
-    circle_alphas = np.asarray([get_phi_diff(np.squeeze(c), phis) for c in circular_contours])
+    circle_alphas = np.asarray([get_phi_diff(np.squeeze(c), phis, thetas) for c in circular_contours])
 
     # Define color maps
     colors = {"all": "blue", "circles": "orange", "ltem": "green"}
@@ -1423,6 +1486,154 @@ def show_alphas_2(
         plt.title = name
 
 
+def show_alphas_3(features):
+    ncols = 3
+    nrows = int(np.ceil(len(features) / ncols))
+
+    fig = plt.figure(figsize=(ncols * 6, nrows * 6));
+    spec = gs.GridSpec(ncols=ncols, nrows=nrows, figure=fig)
+    row, col = 0, 0
+
+    for i in features.keys():
+        c = features[i]
+        alphas = c['alphas']
+        alphas_1_3 = c['alphas_1_3']
+        alphas_2_3 = c['alphas_2_3']
+        alpha_avg = c['alpha_avg']
+        alpha_avg_1_3 = c['alpha_avg_1_3']
+        alpha_avg_2_3 = c['alpha_avg_2_3']
+
+        length = len(alphas)
+        xs = np.arange(length)
+        xs_1 = np.linspace(0, length, len(alphas_1_3))
+        xs_2 = np.linspace(0, length, len(alphas_2_3))
+
+        ax = fig.add_subplot(spec[row, col])
+        ax.scatter(xs, alphas, label='Wall');
+        ax.scatter(xs_1, alphas_1_3, label='1/3');
+        ax.scatter(xs_2, alphas_2_3, label='2/3');
+        ax.axhline(np.pi, color="gray", ls="-", alpha=0.1)
+        ax.axhline(
+            alpha_avg,
+            color="blue",
+            ls="--",
+            label=r"Avg $\alpha$",
+            alpha=0.5
+        )
+        # ax.axhline(alpha_avg + mae, color="green", ls="-.", alpha=0.2)
+        # ax.axhline(alpha_avg - mae, color="green", ls="-.", alpha=0.2)
+        ax.axhline(np.pi, color="gray", ls="-", alpha=0.1)
+        ax.axhline(
+            alpha_avg_1_3,
+            ls="--",
+            color="orange",
+            label=r"Avg $\alpha$ at $\frac{1}{3}$",
+        )
+        ax.axhline(
+            alpha_avg_2_3,
+            ls="--",
+            color="green",
+            label=r"Avg $\alpha$ at $\frac{2}{3}$",
+        )
+
+        ax.set_ylim((0, 2 * np.pi))
+        ax.set_xticks([])
+        ax.set_yticks([0, np.pi / 2, np.pi, 3 / 2 * np.pi, 2 * np.pi])
+        ax.set_yticklabels(
+            [
+                "0",
+                r"$\dfrac{\pi}{2}$",
+                r"$\pi$",
+                r"$\dfrac{3\pi}{2}$",
+                r"$2\pi$",
+            ]
+        )
+        ax.set_title(f'{i}: {alpha_avg_1_3:.2f}, {alpha_avg_2_3:.2f}, {alpha_avg:.2f}')
+        ax.legend(ncol=2);
+
+        col += 1
+        if col == ncols:
+            row += 1
+            col = 0
+            
+
+def show_antiskyrmions(contours, antiskyrmions, magnitudes, phis, thetas, scale, m_1_adjusted, m_2_adjusted, m_3_adjusted):
+    contours_to_use = [contours[i] for i in antiskyrmions.keys()]
+    
+    show_circles(
+        magnitudes,
+        phis,
+        thetas,
+        contours_to_use,
+        scale,
+        m_1_adjusted,
+        m_2_adjusted,
+        m_3_adjusted,
+        normalize=False,
+        show="thetas",
+        show_numbers=True,
+        show_axes=True,
+        show_title=True,
+        just_candidates=False,
+        show_anyway=True,
+        show_limit=100,
+    )
+
+    tick_labels = [
+        "0",
+        r"$\dfrac{\pi}{4}$",
+        r"$\dfrac{\pi}{2}$",
+        r"$\dfrac{3\pi}{4}$",
+        r"$\pi$",
+        r"$\dfrac{5\pi}{4}$",
+        r"$\dfrac{3\pi}{2}$",
+        r"$\dfrac{7\pi}{4}$",
+        r"$2\pi$",
+    ]
+    ncols = 4
+    nrows = int(np.ceil(len(antiskyrmions) / ncols))
+    psize = 6
+    row, col = 0, 0
+
+    fig = plt.figure(figsize=(ncols * psize, nrows * psize))
+    spec = gs.GridSpec(ncols=ncols, nrows=nrows, figure=fig)
+
+    for i in antiskyrmions.keys():
+        ants = antiskyrmions[i]
+
+        ax = fig.add_subplot(spec[row, col])
+        ax.autoscale()
+        values, bins, bars = ax.hist(ants['alphas'], bins=16, alpha=0.8, color='gray', edgecolor='white')
+
+        ax.axvline(np.pi, c='gray', alpha=0.5, zorder=10)
+        
+        fill_alpha = 0.2
+        ax.fill_between(np.linspace(0, np.pi / 2, endpoint=True), max(values), color='red', zorder=0, alpha=fill_alpha)
+        ax.fill_between(np.linspace(np.pi / 2, 3/2 * np.pi, endpoint=True), max(values), color='blue', zorder=0, alpha=fill_alpha)
+        ax.fill_between(np.linspace(3/2 * np.pi, 2 * np.pi, endpoint=True), max(values), color='red', zorder=0, alpha=fill_alpha)
+        
+        # for j in range(len(values)):
+        #     b = bins[j]
+        #     c = 'blue' if np.pi / 2 < b < 3/2 * np.pi else 'red'
+        #     bars[j].set_facecolor(c)
+        
+        c = 'black'
+        t = ax.text(0, max(values), 'In', fontdict={"fontsize": 20}, c='red', horizontalalignment="left", verticalalignment="top")
+        t.set_bbox(dict(facecolor="white", alpha=0.8, edgecolor=c))
+        t = ax.text(np.pi, max(values), 'Out', fontdict={"fontsize": 20}, c='blue', horizontalalignment="center", verticalalignment="top", zorder=20)
+        t.set_bbox(dict(facecolor="white", alpha=0.8, edgecolor=c))
+        t = ax.text(1.9 * np.pi, max(values), 'In', fontdict={"fontsize": 20}, c='red', horizontalalignment="right", verticalalignment="top")
+        t.set_bbox(dict(facecolor="white", alpha=0.8, edgecolor=c))
+
+        ax.set_xticks(np.arange(0, 2.25 * np.pi, step=np.pi / 4), tick_labels)
+        ax.set_title(f'{i}: n = {ants["winding_number"]:.2f}')
+        
+        col += 2
+        if col == ncols:
+            row += 1
+            col = 0
+
+
 def show_circles(
     magnitudes,
     phis,
@@ -1446,281 +1657,386 @@ def show_circles(
     origin="upper",
     show_limit=30,
     show_anyway=False,
-    skip_plot=False,
+    show_plot=True,
+    show_alphas=True,
+    alpha_limit=2 * np.pi,
 ):
     """Plot all circular contours."""
-    masked_circles, _, boxes = show_all_circles(thetas, contours, reverse=reverse, origin=origin)
+    _, _, boxes = show_all_circles(thetas, contours, reverse=reverse, origin=origin)
     count = len(boxes)
-    print(f"Found {count} boxes.")
+    print(f"Found {count} features.")
 
-    # num_columns = 3 if not show_both else 4
-    # column_width = 8 if not show_both else 6
-    num_columns = 4
-    column_width = 6
-    # total_count = count if not show_both else 2 * count
-    total_count = 2 * count
-    # num_rows = np.ceil(total_count / num_columns).astype(int)
-    num_rows = 1
     yd, xd = magnitudes.shape
 
     extent_factor = 0.3
-    index = 1
-    plot_index = 1
-    # sm = cm.ScalarMappable(cmap=cm.coolwarm)
 
     # Track candidates. Cutoff of pi/6 allows for 3 sigma.
     candidates = {}
     all_contours = {}
     c_index, displayed = 0, 0
     cw, ccw = 0, 0
-    new_line = "\n"
-
-    # fig = plt.figure(figsize=(num_columns * column_width, num_rows * column_width));
-    if not skip_plot:
-        fig = plt.figure()
+    # new_line = "\n"
+    contours_to_plot = []
 
     while c_index < len(boxes) and displayed < show_limit:
-        # for box in boxes[:show_limit]:
         box = boxes[c_index]
-        contour = contours[c_index]
-        c_index += 1
 
         xmin, ymin, width, height = box
         width_nm = int(width * scale * scale_multiplier)
         height_nm = int(height * scale * scale_multiplier)
 
-        # Walk along the path of the contour and measure deviations from it
-        path = np.squeeze(contours[index - 1])
+        # Select the area to evaluate
+        extent_x, extent_y = int(extent_factor * width), int(extent_factor * height)
+        extent = np.min([extent_x, extent_y])
+        xmin, ymin = np.max([xmin - extent, 0]), np.max([ymin - extent, 0])
+        xmax = np.min([xmin + width + 2 * extent, xd])
+        ymax = np.min([ymin + height + 2 * extent, yd])
+        box_xd, box_yd = xmax - xmin, ymax - ymin
+        y_s, x_s = slice(ymin, ymax), slice(xmin, xmax)
+        xy_s = (y_s, x_s)
 
-        dev_avg, dev_std, alpha_avg, alpha_std, phi_diffs, alphas = get_phi_diff(path, phis, origin == "upper")
+        # Walk along the path of the contour and measure deviations from it
+        path = contours[c_index]
+
+        # Determine winding number
+        if m_1 is not None:
+            winding_number = calculate_winding_number(m_1, m_2, m_3, xy_s, path, wider_contour=False)
+        else:
+            winding_number = None
+
+        # Scale the path to 1/3 and 2/3 for further alpha evaluation
+        path_1_3 = np.squeeze(scale_contour(path, 1 / 3, thetas))
+        path_2_3 = np.squeeze(scale_contour(path, 2 / 3, thetas))
+        path = np.squeeze(path)
+
+        dev_avg, dev_std, alpha_avg, alpha_std, _, alphas = get_phi_diff(path, phis, thetas, alpha_limit, origin == "upper")
+        _, _, alpha_avg_1_3, alpha_std_1_3, _, alphas_1_3 = get_phi_diff(path_1_3, phis, thetas, alpha_limit, origin == "upper")
+        _, _, alpha_avg_2_3, alpha_std_2_3, _, alphas_2_3 = get_phi_diff(path_2_3, phis, thetas, alpha_limit, origin == "upper")
+
         mae = np.abs(alphas - alpha_avg).mean()
         sem = alpha_std / np.sqrt(len(alphas))
-        fake_news = np.ptp(alphas) >= np.pi if not show_anyway else False
-        candidate = alpha_std <= candidate_cutoff and not fake_news
         chirality = np.pi / 2 if alpha_avg < np.pi else 3 * np.pi / 2
 
-        all_contours[index] = [
-            dev_avg,
-            dev_std,
-            alpha_avg,
-            alpha_std,
-            mae,
-            sem,
-            width_nm,
-            height_nm,
-        ]
+        fake_news = np.ptp(alphas) >= np.pi if not show_anyway else False
+
+        candidate = alpha_std <= candidate_cutoff and not fake_news and is_contour_circular(path)
+
+        if thetas is not None:
+            cx, cy = find_minimum_in_contour(path, thetas)
+            cx -= xmin
+            cy -= ymin
+        else:
+            cx, cy = int(box_xd / 2), int(box_yd / 2)
+
+        if alpha_avg < np.pi:
+            cw += 1
+        else:
+            ccw += 1
+
+        all_contours[c_index] = {
+            "path": path,
+            "path_1_3": path_1_3,
+            "path_2_3": path_2_3,
+            "dev_avg": dev_avg,
+            "dev_std": dev_std,
+            "alpha_avg": alpha_avg,
+            "alpha_std": alpha_std,
+            "mae": mae,
+            "sem": sem,
+            "width_nm": width_nm,
+            "height_nm": height_nm,
+            "alphas": alphas,
+            "alphas_1_3": alphas_1_3,
+            "alpha_avg_1_3": alpha_avg_1_3,
+            "alphas_2_3": alphas_2_3,
+            "alpha_avg_2_3": alpha_avg_2_3,
+            "winding_number": winding_number,
+            "chirality": chirality,
+            "cx": cx,
+            "cy": cy,
+            "xy_s": xy_s,
+            "width": width,
+            "height": height,
+            "xmin": xmin,
+            "xmax": xmax,
+            "ymin": ymin,
+            "ymax": ymax,
+            "box_xd": box_xd,
+            "box_yd": box_yd,
+            "candidate": candidate,
+        }
+
+        if candidate:
+            candidates[c_index] = all_contours[c_index]
 
         if not fake_news and (candidate or not just_candidates):
             displayed += 1
+            contours_to_plot.append(c_index)
 
-            # Select the area to view
-            extent_x, extent_y = int(extent_factor * width), int(extent_factor * height)
-            extent = np.min([extent_x, extent_y])
-            xmin, ymin = np.max([xmin - extent, 0]), np.max([ymin - extent, 0])
-            xmax = np.min([xmin + width + 2 * extent, xd])
-            ymax = np.min([ymin + height + 2 * extent, yd])
-            box_xd, box_yd = xmax - xmin, ymax - ymin
-            y_s, x_s = slice(ymin, ymax), slice(xmin, xmax)
-            xy_s = (y_s, x_s)
+        c_index += 1
 
-            m_subset = magnitudes[xy_s]
-            p_subset = phis[xy_s]
-            t_subset = thetas[xy_s]
-
-            # Determine winding number
-            if m_1 is not None:
-                winding_number = calculate_winding_number(m_1, m_2, m_3, xy_s, contour, wider_contour=False)
-            else:
-                winding_number = None
-            all_contours[index].append(winding_number)
-
-            if candidate and is_contour_circular(contour):
-                candidates[index] = all_contours[index]
-            else:
-                candidate = False
-
-            if alpha_avg < np.pi:
-                cw += 1
-            else:
-                ccw += 1
-
-            if not skip_plot:
-                # Set the image and pick a color map
-                im_to_show = p_subset if show == "phis" else t_subset
-                cmap_to_show = ciecam02_cmap() if show == "phis" else cm.coolwarm_r
-                cmap_max = 2 * np.pi if show == "phis" else np.pi
-
-                # Create a pair of (x, y) coordinates
-                x = np.linspace(1, box_xd - 2, box_xd, dtype=np.uint8)
-                y = np.linspace(1, box_yd - 2, box_yd, dtype=np.uint8)
-                X, Y = np.meshgrid(x, y)
-
-                # Create vector lengths
-                U = np.ones_like(m_subset) if normalize else m_subset * np.cos(p_subset) * np.sin(t_subset)
-                V = np.ones_like(m_subset) if normalize else m_subset * np.sin(p_subset) * np.sin(t_subset)
-
-                # index_to_show = index if not show_both else 2 * index - 1
-                if plot_index % (num_columns * num_rows + 1) == 0:
-                    num_rows += 1
-                    n = len(fig.axes)
-
-                    for i in range(n):
-                        fig.axes[i].change_geometry(num_rows, num_columns, i + 1)
-
-                # Create the axes
-                ax = plt.subplot(num_rows, num_columns, plot_index)
-                ax.autoscale()
-
-                # Show the feature and path
-                ax.imshow(im_to_show, cmap=cmap_to_show, vmin=0, vmax=cmap_max, origin=origin)
-                m = get_contour_mask(contour, m_1, xy_s)
-                mask = np.ma.masked_where(m == 0, m) / 255 * chirality
-                ax.imshow(mask, interpolation="none", alpha=0.7, origin=origin, vmin=0, vmax=2 * np.pi, cmap="plasma_r")
-                ax.add_artist(ScaleBar(scale, box_alpha=0.8))
-
-                title = (
-                    f"({xmin}, {ymin}) to ({xmax}, {ymax}), "
-                    f"{width_nm}x{height_nm} nm\n"
-                    rf"$\alpha:\ {alpha_avg:.2f},\ \sigma_{{\alpha}}:\ {alpha_std:.2f}\quad $"
-                    rf"$\phi_{{dev}}:\ {dev_avg:.2f},\ \sigma_{{dev}}:\ {dev_std:.2f}$"
-                )
-                if winding_number:
-                    title += rf"$\quad n: {winding_number:.2f}$"
-
-                ax.set_title(title if show_title else "")
-
-                # Place 4 dots to show the direction around the path
-                colors = itertools.cycle(["red", "yellow", "green", "blue"])
-                num_pts = len(path)
-                pts = [
-                    path[0],
-                    path[int(num_pts / 4)],
-                    path[int(num_pts / 2)],
-                    path[int(3 * num_pts / 4)],
-                ]
-                for point in pts:
-                    ax.scatter(point[0] - xmin, point[1] - ymin, c=next(colors))
-
-                if show_numbers:
-                    c = "blue" if candidate else "red"
-                    label = rf"{c_index}$\circlearrowright$" if alpha_avg < np.pi else rf"{c_index}$\circlearrowleft$"
-
-                    t = ax.text(
-                        0,
-                        0,
-                        label,
-                        fontdict={"fontsize": 20},
-                        c=c,
-                        horizontalalignment="left",
-                        verticalalignment="top",
-                    )
-                    t.set_bbox(dict(facecolor="white", alpha=0.8, edgecolor=c))
-
-                # Show the vectors
-                ax.quiver(X, Y, U, V, angles=p_subset * 180 / np.pi, pivot="mid", units="dots")
-
-                # Turn axis labels on or off
-                if show_axes:
-                    x_span, y_span = width // 5, height // 5
-                    ax.set_xticks(x[::x_span])
-                    ax.set_xticklabels((x + xmin - 1).astype(int)[::x_span])
-                    ax.set_yticks(y[::y_span])
-                    ax.set_yticklabels((y + ymin - 1).astype(int)[::y_span])
-                else:
-                    ax.set_xticks([])
-                    ax.set_yticks([])
-
-                # Show alphas
-                num_alphas = len(alphas)
-                xs = np.linspace(1, num_alphas + 1, num_alphas)
-                ax = plt.subplot(num_rows, num_columns, plot_index + 1)
-                ax.autoscale()
-                ax.plot(xs, alphas, ".", label=r"$\alpha$")
-                # ax.errorbar(xs, alphas, yerr=alpha_std,
-                # fmt='.', ms=6, label=r'$\alpha$')
-                ax.fill_between(xs, alphas + alpha_std, alphas - alpha_std, alpha=0.2)
-                # ax.plot(xs[2:-2], alphas_fit, '-', label='Moving average')
-                ax.axhline(
-                    alpha_avg,
-                    color="orange",
-                    ls="--",
-                    label=f"Average{new_line}MAE: {mae:.2f}{new_line}SEM: {sem:.2f}",
-                )
-                ax.axhline(alpha_avg + mae, color="green", ls="-.", alpha=0.2)
-                ax.axhline(alpha_avg - mae, color="green", ls="-.", alpha=0.2)
-                ax.axhline(np.pi, color="gray", ls="-", alpha=0.1)
-                ax.set_ylim((0, 2 * np.pi))
-                ax.set_xticks([])
-                ax.set_yticks([0, np.pi / 2, np.pi, 3 / 2 * np.pi, 2 * np.pi])
-                ax.set_yticklabels(
-                    [
-                        "0",
-                        r"$\dfrac{\pi}{2}$",
-                        r"$\pi$",
-                        r"$\dfrac{3\pi}{2}$",
-                        r"$2\pi$",
-                    ]
-                )
-
-                ax.set_title(rf"$\alpha$: {alphas.min():.3f} to {alphas.max():.3f}, {alpha_avg:.3f} average")
-                plt.legend()
-                plot_index += 1
-
-                if show_both:
-                    p_m_subset = phis_m[xy_s]
-
-                    ax = plt.subplot(num_rows, num_columns, 2 * index)
-                    ax.autoscale()
-                    ax.imshow(p_m_subset, cmap=ciecam02_cmap())
-                    ax.imshow(
-                        masked_circles[ymin:ymax, xmin:xmax],
-                        interpolation="none",
-                        alpha=alpha,
-                        cmap=cm.binary,
-                    )
-                    ax.add_artist(ScaleBar(scale, box_alpha=0.8))
-
-                    if show_numbers:
-                        t = ax.text(
-                            0,
-                            0,
-                            index,
-                            fontdict={"fontsize": 20},
-                            c="black",
-                            horizontalalignment="left",
-                            verticalalignment="top",
-                        )
-                        t.set_bbox(dict(facecolor="white", alpha=0.8, edgecolor="black"))
-
-                    ax.quiver(
-                        X,
-                        Y,
-                        U,
-                        V,
-                        units="dots",
-                        angles=p_subset * 180 / np.pi,
-                        color="white",
-                    )
-
-                    ax.set_title(title)
-                    span = 5
-                    ax.set_xticks(x[::span])
-                    ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
-                    ax.set_yticks(y[::span])
-                    ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
-
-                plot_index += 1 if not show_both else 2
-
-        index += 1
-
-    if not skip_plot:
-        fig.set_size_inches(num_columns * column_width, num_rows * column_width)
-
-    number_of_plots = np.min((show_limit, count))
+    number_of_plots = np.min((show_limit, c_index))
     spurious = f" ({number_of_plots - cw - ccw} spurious contours)" if number_of_plots - cw - ccw > 0 else ""
     print(f"Found {cw} clockwise and {ccw} anticlockwise contours{spurious}")
+    
+    if show_plot:
+        show_circles_plot(
+            displayed,
+            all_contours,
+            contours_to_plot,
+            magnitudes,
+            phis,
+            thetas,
+            scale,
+            show=show,
+            normalize=normalize,
+            origin=origin,
+            show_title=show_title,
+            show_numbers=show_numbers,
+            show_axes=show_axes,
+            show_alphas=show_alphas,
+            alpha_limit=alpha_limit,
+        )
 
     return candidates, all_contours
+
+
+def show_circles_plot(
+    displayed,
+    all_contours,
+    contours_to_plot,
+    magnitudes,
+    phis,
+    thetas,
+    scale,
+    show="thetas",
+    normalize=True,
+    origin="upper",
+    show_title=True,
+    show_numbers=True,
+    show_axes=True,
+    show_alphas=True,
+    alpha_limit=2 * np.pi,
+):
+    ncols = 4
+    column_width = 6
+    nrows = np.ceil(2 * displayed / ncols).astype(int)
+    row, col = 0, 0
+
+    fig = plt.figure(figsize=(ncols * column_width, nrows * column_width))
+    spec = gs.GridSpec(ncols=ncols, nrows=nrows, figure=fig)
+
+    for c_index in contours_to_plot:
+        item = all_contours[c_index]
+        path = item["path"]
+        path_1_3 = item["path_1_3"]
+        path_2_3 = item["path_2_3"]
+        alphas = item["alphas"]
+        alphas_1_3 = item["alphas_1_3"]
+        alphas_2_3 = item["alphas_2_3"]
+        dev_avg = item["dev_avg"]
+        dev_std = item["dev_std"]
+        alpha_avg = item["alpha_avg"]
+        alpha_avg_1_3 = item["alpha_avg_1_3"]
+        alpha_avg_2_3 = item["alpha_avg_2_3"]
+        alpha_std = item["alpha_std"]
+        candidate = item["candidate"]
+
+        xy_s = item["xy_s"]
+        xmin, xmax, ymin, ymax = item["xmin"], item["xmax"], item["ymin"], item["ymax"]
+        width, height = item["width"], item["height"]
+        box_xd, box_yd = item["box_xd"], item["box_yd"]
+        winding_number = item["winding_number"]
+        chirality = item["chirality"]
+        cx, cy = item["cx"], item["cy"]
+        width_nm, height_nm = item["width_nm"], item["height_nm"]
+
+        # Set the underlying image and pick a color map
+        m_subset = magnitudes[xy_s]
+        p_subset = phis[xy_s]
+        t_subset = thetas[xy_s]
+
+        im_to_show = p_subset if show == "phis" else t_subset
+        cmap_to_show = ciecam02_cmap() if show == "phis" else cm.coolwarm_r
+        cmap_max = 2 * np.pi if show == "phis" else np.pi
+
+        # Create a pair of (x, y) coordinates
+        x = np.linspace(1, box_xd - 2, box_xd, dtype=np.uint8)
+        y = np.linspace(1, box_yd - 2, box_yd, dtype=np.uint8)
+        X, Y = np.meshgrid(x, y)
+
+        # Create vector lengths
+        U = np.ones_like(m_subset) if normalize else m_subset * np.cos(p_subset) * np.sin(t_subset)
+        V = np.ones_like(m_subset) if normalize else m_subset * np.sin(p_subset) * np.sin(t_subset)
+
+        # Create the axes
+        ax = fig.add_subplot(spec[row, col])
+        ax.autoscale()
+        col += 1
+
+        # Show the feature and path
+        ax.imshow(im_to_show, cmap=cmap_to_show, vmin=0, vmax=cmap_max, origin=origin)
+        # m = get_contour_mask(path, m_1, xy_s)
+        m = get_contour_mask(path, np.zeros_like(phis), xy_s)
+        mask = np.ma.masked_where(m == 0, m) / 255 * chirality
+        ax.imshow(mask, interpolation="none", alpha=0.7, origin=origin, vmin=0, vmax=2 * np.pi, cmap="plasma_r")
+        ax.scatter(path_1_3[:, 0] - xmin + 1, path_1_3[:, 1] - ymin, color="yellow", alpha=0.3)
+        ax.scatter(path_2_3[:, 0] - xmin + 1, path_2_3[:, 1] - ymin, color="green", alpha=0.3)
+        ax.add_artist(ScaleBar(scale, box_alpha=0.8))
+        ax.scatter(cx, cy, color="black")
+
+        title = (
+            f"({xmin}, {ymin}) to ({xmax}, {ymax}), "
+            f"{width_nm}x{height_nm} nm\n"
+            rf"$\alpha:\ {alpha_avg:.2f},\ \sigma_{{\alpha}}:\ {alpha_std:.2f}\quad $"
+            rf"$\phi_{{dev}}:\ {dev_avg:.2f},\ \sigma_{{dev}}:\ {dev_std:.2f}$"
+        )
+        if winding_number:
+            title += rf"$\quad n: {winding_number:.2f}$"
+
+        ax.set_title(title if show_title else "")
+
+        # Place 4 dots to show the direction around the path
+        colors = itertools.cycle(["red", "yellow", "green", "blue"])
+        num_pts = len(path)
+        pts = [
+            path[0],
+            path[int(num_pts / 4)],
+            path[int(num_pts / 2)],
+            path[int(3 * num_pts / 4)],
+        ]
+        for point in pts:
+            ax.scatter(point[0] - xmin, point[1] - ymin, c=next(colors))
+
+        if show_numbers:
+            c = "blue" if candidate else "red"
+            label = rf"{c_index + 1}$\circlearrowright$" if alpha_avg < np.pi else rf"{c_index + 1}$\circlearrowleft$"
+
+            t = ax.text(
+                0,
+                0,
+                label,
+                fontdict={"fontsize": 20},
+                c=c,
+                horizontalalignment="left",
+                verticalalignment="top",
+            )
+            t.set_bbox(dict(facecolor="white", alpha=0.8, edgecolor=c))
+
+        # Show the vectors
+        ax.quiver(X, Y, U, V, angles=p_subset * 180 / np.pi, pivot="mid", units="dots")
+
+        # Turn axis labels on or off
+        if show_axes:
+            x_span, y_span = width // 5, height // 5
+            ax.set_xticks(x[::x_span])
+            ax.set_xticklabels((x + xmin - 1).astype(int)[::x_span])
+            ax.set_yticks(y[::y_span])
+            ax.set_yticklabels((y + ymin - 1).astype(int)[::y_span])
+        else:
+            ax.set_xticks([])
+            ax.set_yticks([])
+        #
+        #
+        # -----------------------------------
+        #
+        # Show alphas
+        if show_alphas:
+            num_alphas = len(alphas)
+            xs = np.linspace(1, num_alphas + 1, num_alphas)
+            xs_1 = np.linspace(1, num_alphas + 1, len(alphas_1_3))
+            xs_2 = np.linspace(1, num_alphas + 1, len(alphas_2_3))
+
+            ax = fig.add_subplot(spec[row, col])
+            ax.autoscale()
+            col += 1
+
+            ax.plot(xs, alphas, ".", label=r"$\alpha$")
+            ax.plot(xs_1, alphas_1_3, ".", label=r"$\alpha$ at $\frac{1}{3}$")
+            ax.plot(xs_2, alphas_2_3, ".", label=r"$\alpha$ at $\frac{2}{3}$")
+            ax.fill_between(xs, alphas + alpha_std, alphas - alpha_std, alpha=0.1)
+            
+            ax.axhline(np.pi, color="gray", ls="-", alpha=0.1)
+            
+            ax.axhline(alpha_avg, color="blue", ls="--", label=r"Avg $\alpha$", alpha=0.5)
+            ax.axhline(
+                alpha_avg_1_3,
+                ls="--",
+                color="yellow",
+                label=r"Avg $\alpha$ at $\frac{1}{3}$",
+            )
+            ax.axhline(
+                alpha_avg_2_3,
+                ls="--",
+                color="green",
+                label=r"Avg $\alpha$ at $\frac{2}{3}$",
+            )
+            
+            ax.set_ylim((0, alpha_limit))
+            ax.set_xticks([])
+            ax.set_yticks(np.linspace(0, alpha_limit, 5, endpoint=True))
+            # ax.set_yticks([0, np.pi / 2, np.pi, 3 / 2 * np.pi, 2 * np.pi])
+            ax.set_yticklabels(
+                [
+                    "0",
+                    r"$\dfrac{\pi}{2}$",
+                    r"$\pi$",
+                    r"$\dfrac{3\pi}{2}$",
+                    r"$2\pi$",
+                ]
+            )
+
+            ax.set_title(
+                rf"$\alpha$: {alphas.min():.2f} to {alphas.max():.2f}, {alpha_avg:.2f} ({alpha_avg_2_3:.2f}, {alpha_avg_1_3:.2f}) average"
+            )
+            ax.legend(ncol=3)
+
+        if col == ncols:
+            row += 1
+            col = 0
+
+        # if show_both:
+        #     p_m_subset = phis_m[xy_s]
+
+        #     ax = plt.subplot(num_rows, num_columns, 2 * index)
+        #     ax.autoscale()
+        #     ax.imshow(p_m_subset, cmap=ciecam02_cmap())
+        #     ax.imshow(
+        #         masked_circles[ymin:ymax, xmin:xmax],
+        #         interpolation="none",
+        #         alpha=alpha,
+        #         cmap=cm.binary,
+        #     )
+        #     ax.add_artist(ScaleBar(scale, box_alpha=0.8))
+
+        #     if show_numbers:
+        #         t = ax.text(
+        #             0,
+        #             0,
+        #             index,
+        #             fontdict={"fontsize": 20},
+        #             c="black",
+        #             horizontalalignment="left",
+        #             verticalalignment="top",
+        #         )
+        #         t.set_bbox(dict(facecolor="white", alpha=0.8, edgecolor="black"))
+
+        #     ax.quiver(
+        #         X,
+        #         Y,
+        #         U,
+        #         V,
+        #         units="dots",
+        #         angles=p_subset * 180 / np.pi,
+        #         color="white",
+        #     )
+
+        #     ax.set_title(title)
+        #     span = 5
+        #     ax.set_xticks(x[::span])
+        #     ax.set_xticklabels((x + xmin - 1).astype(int)[::span])
+        #     ax.set_yticks(y[::span])
+        #     ax.set_yticklabels((y + ymin - 1).astype(int)[::span])
 
 
 def show_contour_sizes(
@@ -1784,7 +2100,7 @@ def show_contours_overview(
     ax1 = fig.add_subplot(221)
     ax1.imshow(thetas_flattened, cmap=cm.coolwarm_r)
 
-    show_all_circles(thetas_flattened, contours_g, phis=phis_flattened, ax=ax1, alpha=0.7)
+    show_all_circles(thetas_flattened, contours_g, phis=phis_flattened, thetas=thetas_flattened, ax=ax1, alpha=0.7)
 
     sm = cm.ScalarMappable(cmap=cm.coolwarm)
     cbar = fig.colorbar(sm, ax=ax1, shrink=0.3)
@@ -1799,7 +2115,9 @@ def show_contours_overview(
     ax2 = fig.add_subplot(222)
     ax2.imshow(thetas_flattened, cmap=cm.coolwarm_r)
 
-    show_all_circles(thetas_flattened, circular_contours, phis=phis_flattened, ax=ax2, alpha=0.7)
+    show_all_circles(
+        thetas_flattened, circular_contours, phis=phis_flattened, thetas=thetas_flattened, ax=ax2, alpha=0.7
+    )
 
     sm = cm.ScalarMappable(cmap=cm.coolwarm)
     cbar = fig.colorbar(sm, ax=ax2, shrink=0.3)
@@ -1810,7 +2128,9 @@ def show_contours_overview(
 
     ax3 = fig.add_subplot(223)
     ax3.imshow(phis_flattened, cmap=ciecam02_cmap(), alpha=0.7)
-    show_all_circles(thetas_flattened, contours_g, phis=phis_flattened, ax=ax3, alpha=0.7, color="white")
+    show_all_circles(
+        thetas_flattened, contours_g, phis=phis_flattened, thetas=thetas_flattened, ax=ax3, alpha=0.7, color="white"
+    )
     ax32 = inset_axes(ax3, width="15%", height="15%", loc=4, axes_class=get_projection_class("polar"))
     show_phase_colors_circle(ax32, add_dark_background=False, show_angles=False)
     ax3.add_artist(ScaleBar(scale, box_alpha=0.8))
@@ -1881,7 +2201,7 @@ def show_groups(contours, magnitudes, phis, thetas, scale, normalize=True, origi
         for contour_index in group:
             contour = contours[contour_index]
             path = np.squeeze(contour)
-            _, _, alpha_avg, _, _, _ = get_phi_diff(path, phis, origin == "upper")
+            _, _, alpha_avg, _, _, _ = get_phi_diff(path, phis, thetas, origin == "upper")
             chirality = np.pi / 2 if alpha_avg < np.pi else 3 * np.pi / 2
             m = get_contour_mask(contour, magnitudes, xy_s)
             mask = np.ma.masked_where(m == 0, m) / 255 * chirality
@@ -1926,6 +2246,7 @@ def show_ltem_data(
     ltem_yerror,
     name,
     use_cutoff=False,
+    show_angles=True,
 ):
     ydim, xdim = ltem_magnitudes.shape
     cutoff = np.min((xdim, ydim)) // 32
@@ -1954,8 +2275,9 @@ def show_ltem_data(
     ax1.set_xticks([])
     ax1.set_yticks([])
     ax1.add_artist(ScaleBar(ltem_xerror))
-    ax12 = inset_axes(ax1, width="15%", height="15%", loc=4, axes_class=get_projection_class("polar"))
-    show_phase_colors_circle(ax12, add_dark_background=True, show_angles=False)
+    if show_angles:
+        ax12 = inset_axes(ax1, width="15%", height="15%", loc=4, axes_class=get_projection_class("polar"))
+        show_phase_colors_circle(ax12, add_dark_background=True, show_angles=False)
 
     ax2 = plt.subplot(132)
     ax2.imshow(magnitudes_reduced, cmap="gray", origin="lower")
@@ -2042,8 +2364,8 @@ def show_magnitude_distribution(magnitudes):
     avg = (1 + 2 * np.squeeze(np.where(n == max_count))[()]) / (2 * bins) * np.max(magnitudes)
     spline = UnivariateSpline(np.linspace(0, np.max(magnitudes), bins), n - max_count / 2, s=0)
     plt.axvspan(*spline.roots(), facecolor="gray", alpha=0.4, zorder=0)
-    
-    ax.set_xlim(0, np.max(magnitudes));
+
+    ax.set_xlim(0, np.max(magnitudes))
     ax.set_title(f"Magnitudes normalized (max count at {avg:.2f})")
 
 
